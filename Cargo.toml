@@ -1,0 +1,24 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/core",
+    "crates/cli",
+    "crates/gui",
+    "crates/platform-android",
+    "crates/shell-win",
+    "crates/shell-linux",
+    "crates/shell-mac",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+repository = "https://github.com/Anastasimandro/Zstar"
+publish = false
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

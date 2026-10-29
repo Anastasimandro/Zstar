@@ -1,2 +1,7 @@
 /target
 *.part
+
+# rustfmt backups, MSVC debug info, rustc ICE dumps
+**/*.rs.bk
+*.pdb
+rustc-ice-*.txt

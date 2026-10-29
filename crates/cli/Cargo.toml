@@ -1,0 +1,20 @@
+[package]
+name = "zstar-cli"
+description = "Command-line interface for Zstar"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "zstar"
+path = "src/main.rs"
+
+[dependencies]
+zstar-core.workspace = true
+lexopt.workspace = true
+ctrlc.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

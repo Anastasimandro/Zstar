@@ -1,0 +1,24 @@
+[package]
+name = "zstar-core"
+description = "Archive engine for Zstar: stream-based, no UI, no OS-specific code"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[features]
+default = ["zip", "tar", "gzip", "zstd"]
+zip = ["dep:zip"]
+tar = ["dep:tar"]
+gzip = ["dep:flate2"]
+zstd = ["dep:zstd"]
+
+[dependencies]
+flate2 = { workspace = true, optional = true }
+tar = { workspace = true, optional = true }
+zip = { workspace = true, optional = true }
+zstd = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true

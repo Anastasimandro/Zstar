@@ -1,0 +1,27 @@
+# Zstar is GPL-3.0-only: every dependency must be under a licence that can be combined with it.
+[licenses]
+confidence-threshold = 0.9
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
+    "Zlib",
+    "Unicode-3.0",
+    "Unlicense",
+    "GPL-3.0-only", # the workspace crates themselves
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# RAR is extract-only, through libarchive. Never use the unrar crate.
+deny = [{ crate = "unrar" }, { crate = "unrar_sys" }]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+
+[advisories]
+unmaintained = "workspace"

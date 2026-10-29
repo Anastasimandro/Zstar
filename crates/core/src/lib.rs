@@ -13,6 +13,8 @@
 //! bytes actually written. See `extract.rs` for the full list of guarantees.
 
 #![forbid(unsafe_code)]
+// Without any format feature the engine has nothing to drive; keep that build warning-free.
+#![cfg_attr(not(any(feature = "zip", feature = "tar")), allow(dead_code))]
 
 mod detect;
 mod error;
@@ -23,6 +25,7 @@ mod options;
 mod path;
 mod progress;
 mod sources;
+#[cfg(feature = "zip")]
 mod timeconv;
 
 use std::fs::{self, File};

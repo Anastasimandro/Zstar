@@ -51,6 +51,7 @@ pub(crate) struct Session<'a> {
     opts: &'a Options,
     tracker: Tracker<'a>,
     input_len: u64,
+    #[cfg_attr(not(feature = "tar"), allow(dead_code))]
     entries: AtomicU64,
     files: AtomicU64,
     dirs: AtomicU64,
@@ -101,11 +102,13 @@ impl<'a> Session<'a> {
         })
     }
 
+    #[cfg_attr(not(feature = "tar"), allow(dead_code))]
     pub(crate) fn rel_path(&self, name: &[u8]) -> Result<PathBuf> {
         sanitize(name, self.opts.windows_names)
     }
 
     /// Stops all workers: they see [`Error::Cancelled`] at their next check.
+    #[cfg_attr(not(feature = "zip"), allow(dead_code))]
     pub(crate) fn abort(&self) {
         self.abort.store(true, Ordering::Relaxed);
     }
@@ -118,6 +121,7 @@ impl<'a> Session<'a> {
     }
 
     /// Counts one more entry against the entry limit.
+    #[cfg_attr(not(feature = "tar"), allow(dead_code))]
     pub(crate) fn begin_entry(&self) -> Result<()> {
         self.check_stop()?;
         let n = self.entries.fetch_add(1, Ordering::Relaxed) + 1;
@@ -232,6 +236,7 @@ impl<'a> Session<'a> {
     }
 
     /// Creates a hard link to a file that was already extracted from the same archive.
+    #[cfg_attr(not(feature = "tar"), allow(dead_code))]
     pub(crate) fn hard_link(&self, rel: &Path, target: &Path, name: &str, raw: &str) -> Result<()> {
         let link = self.root.join(rel);
         let source = self.root.join(target);
@@ -254,6 +259,7 @@ impl<'a> Session<'a> {
         Ok(())
     }
 
+    #[cfg_attr(not(feature = "tar"), allow(dead_code))]
     pub(crate) fn skip_entry(&self) {
         self.skipped.fetch_add(1, Ordering::Relaxed);
     }

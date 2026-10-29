@@ -72,19 +72,20 @@ impl TarFormat {
 
     /// Validates `opts.level` for this codec and returns it, or the codec's default.
     fn level(&self, opts: &Options) -> Result<i32> {
-        let (default, range) = match self.codec {
-            Codec::None => {
-                return match opts.level {
-                    None => Ok(0),
-                    Some(_) => Err(Error::InvalidOption(
-                        "plain tar has no compression level".into(),
-                    )),
-                };
-            }
+        let bounds: Option<(i32, std::ops::RangeInclusive<i32>)> = match self.codec {
+            Codec::None => None,
             #[cfg(feature = "gzip")]
-            Codec::Gzip => (6, 0..=9),
+            Codec::Gzip => Some((6, 0..=9)),
             #[cfg(feature = "zstd")]
-            Codec::Zstd => (3, 1..=22),
+            Codec::Zstd => Some((3, 1..=22)),
+        };
+        let Some((default, range)) = bounds else {
+            return match opts.level {
+                None => Ok(0),
+                Some(_) => Err(Error::InvalidOption(
+                    "plain tar has no compression level".into(),
+                )),
+            };
         };
         match opts.level {
             None => Ok(default),
@@ -310,6 +311,7 @@ impl ArchiveFormat for TarFormat {
         out: &mut dyn WriteSeek,
         opts: &Options,
     ) -> Result<()> {
+        #[cfg_attr(not(any(feature = "gzip", feature = "zstd")), allow(unused_variables))]
         let level = self.level(opts)?;
         let result = match self.codec {
             Codec::None => write_tar(out, sources, opts).map(drop),

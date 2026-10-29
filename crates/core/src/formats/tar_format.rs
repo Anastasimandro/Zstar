@@ -134,6 +134,33 @@ fn describe<R: Read>(entry: &tar::Entry<'_, R>) -> EntryInfo {
     }
 }
 
+/// Fails with `UnexpectedEof` if the stream ends before the size promised by the header,
+/// so a truncated archive can never produce a short file that gets renamed into place.
+struct Exact<R> {
+    inner: R,
+    left: u64,
+}
+
+impl<R: Read> Read for Exact<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.left == 0 {
+            return Ok(0);
+        }
+        let max = buf
+            .len()
+            .min(usize::try_from(self.left).unwrap_or(usize::MAX));
+        let n = self.inner.read(&mut buf[..max])?;
+        if n == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "truncated tar entry",
+            ));
+        }
+        self.left -= n as u64;
+        Ok(n)
+    }
+}
+
 /// A file reader that honours cancellation and reports progress.
 struct Counting<'a, 'o> {
     file: File,
@@ -245,7 +272,12 @@ impl ArchiveFormat for TarFormat {
                     EntryKind::File => {
                         let mode = entry.header().mode().ok();
                         let mtime = mtime_of(entry.header());
-                        session.write_file(&rel, &name, &mut entry, mode, mtime, &mut buf)?;
+                        let left = entry.size();
+                        let mut exact = Exact {
+                            inner: &mut entry,
+                            left,
+                        };
+                        session.write_file(&rel, &name, &mut exact, mode, mtime, &mut buf)?;
                     }
                     kind @ (EntryKind::Symlink | EntryKind::Hardlink) => {
                         let raw = entry

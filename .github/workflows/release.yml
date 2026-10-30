@@ -1,0 +1,129 @@
+name: Release
+
+# Every commit that passes CI on main becomes a release with the next version number.
+# Versions are MAJOR.MINOR from Cargo.toml plus a patch that grows by one per release:
+# 0.1.0, 0.1.1, 0.1.2, ... Bump MINOR in Cargo.toml to start a new series at .0.
+# Put [skip release] in a commit message to publish nothing for that commit.
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Two releases must never pick the same number.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: Next version
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       !contains(github.event.workflow_run.head_commit.message, '[skip release]'))
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.next.outputs.tag }}
+      version: ${{ steps.next.outputs.version }}
+      sha: ${{ steps.next.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          fetch-depth: 0
+      - name: Compute the next version
+        id: next
+        shell: bash
+        run: |
+          base=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)"/\1/')
+          series=${base%.*}
+          last=$(git tag -l "v${series}.*" | sed "s/^v${series}\.//" | grep -E '^[0-9]+$' | sort -n | tail -1 || true)
+          patch=$(( ${last:-(-1)} + 1 ))
+          version="${series}.${patch}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "Releasing v$version"
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: version
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { name: linux-x64, os: ubuntu-latest, ext: tar.gz }
+          - { name: windows-x64, os: windows-latest, ext: zip }
+          - { name: macos-arm64, os: macos-latest, ext: tar.gz }
+    env:
+      ZSTAR_VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release --locked -p zstar-cli
+      - name: Package
+        shell: bash
+        run: |
+          pkg="zstar-${{ needs.version.outputs.version }}-${{ matrix.name }}"
+          mkdir "$pkg"
+          cp LICENSE README.md DEPENDENCIES.md "$pkg/"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp target/release/zstar.exe "$pkg/"
+            7z a "$pkg.zip" "$pkg" > /dev/null
+          else
+            cp target/release/zstar "$pkg/"
+            tar -czf "$pkg.tar.gz" "$pkg"
+          fi
+          echo "ASSET=$pkg.${{ matrix.ext }}" >> "$GITHUB_ENV"
+      - name: Smoke test the packaged binary
+        shell: bash
+        run: |
+          bin="zstar-${{ needs.version.outputs.version }}-${{ matrix.name }}/zstar"
+          [ -f "$bin.exe" ] && bin="$bin.exe"
+          out=$("$bin" --version)
+          echo "$out"
+          [ "$out" = "zstar ${{ needs.version.outputs.version }}" ]
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ env.ASSET }}
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum zstar-* > SHA256SUMS
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Versions below 1.0 are marked as pre-releases.
+          flags=""
+          case "${{ needs.version.outputs.version }}" in 0.*) flags="--prerelease" ;; esac
+          gh release create "${{ needs.version.outputs.tag }}" dist/* \
+            --repo "${{ github.repository }}" \
+            --target "${{ needs.version.outputs.sha }}" \
+            --title "Zstar ${{ needs.version.outputs.version }}" \
+            --generate-notes $flags

@@ -11,6 +11,13 @@ use std::time::Instant;
 use lexopt::prelude::*;
 use zstar_core::{EntryKind, Error, Format, LimitKind, Options};
 
+/// Release builds set `ZSTAR_VERSION` (see `.github/workflows/release.yml`) so the binary
+/// reports the version of the release it was published in.
+const VERSION: &str = match option_env!("ZSTAR_VERSION") {
+    Some(v) => v,
+    None => env!("CARGO_PKG_VERSION"),
+};
+
 const USAGE: &str = "\
 zstar - archive tool
 
@@ -89,7 +96,7 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Cli>, String
                 return Ok(None);
             }
             Short('V') | Long("version") => {
-                println!("zstar {}", env!("CARGO_PKG_VERSION"));
+                println!("zstar {VERSION}");
                 return Ok(None);
             }
             Short('j') | Long("threads") => {

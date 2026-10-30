@@ -100,7 +100,7 @@ jobs:
         include:
           - { name: linux-x64, os: ubuntu-latest, ext: tar.gz }
           - { name: windows-x64, os: windows-latest, ext: zip }
-          - { name: macos-arm64, os: macos-latest, ext: tar.gz }
+          # macOS is paused, see docs/adr/0004-macos-paused.md
     env:
       ZSTAR_VERSION: ${{ needs.plan.outputs.version }}
     steps:
@@ -165,7 +165,7 @@ jobs:
         working-directory: dist
         run: |
           set -euo pipefail
-          [ "$(ls zstar-* | wc -l)" -eq 3 ] || { echo "::error::Expected 3 archives."; ls -l; exit 1; }
+          [ "$(ls zstar-* | wc -l)" -eq 2 ] || { echo "::error::Expected 2 archives (linux-x64, windows-x64)."; ls -l; exit 1; }
           sha256sum zstar-* > SHA256SUMS
           cat SHA256SUMS
       - name: Generate notes

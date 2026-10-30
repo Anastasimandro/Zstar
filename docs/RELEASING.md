@@ -12,4 +12,7 @@ After CI passes, the Release workflow tags `vX.Y.Z` and publishes it. A version 
 pre-release; without one it is stable and marked Latest. If the tag already exists the run fails
 and changes nothing: bump the version and commit again.
 
+Releases currently ship Linux (x64) and Windows (x64) only; macOS is paused
+([ADR 0004](adr/0004-macos-paused.md)).
+
 Pull requests never release. Background: [ADR 0003](adr/0003-release-flow.md).

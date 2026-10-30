@@ -4,6 +4,9 @@ Fast, low-memory archive manager for Windows, Linux, macOS and Android. Open sou
 (GPL-3.0-only), written in Rust. Goals, in order: speed, low
 memory use and fast startup; then a clean, intuitive design.
 
+Releases currently ship Linux and Windows builds only. macOS is temporarily paused (see
+[ADR 0004](docs/adr/0004-macos-paused.md)); the code keeps its macOS support but it is not built or tested in CI.
+
 This repository currently holds the engine and the command line:
 
 - `crates/core`: the archive engine (no UI, stream-based). zip, tar, tar.gz and tar.zst.

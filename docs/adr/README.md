@@ -10,3 +10,4 @@ Each ADR has a status, the context, the decision and its consequences. Keep it s
 | --- | --- | --- |
 | [0001](0001-license.md) | License | Accepted |
 | [0002](0002-phase-1-engine.md) | Phase 1 engine design | Accepted |
+| [0003](0003-release-flow.md) | Release flow | Accepted |

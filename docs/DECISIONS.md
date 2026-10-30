@@ -50,7 +50,7 @@ Full app with its own file browser. Full file access as the main mode; SAF for e
 ## 8. Distribution, CI/CD, signing
 - Distribution: GitHub Releases only. No Google Play, no Microsoft Store, no Google developer registration. The README documents Android installation (Google's advanced flow or ADB), after Phase 0 test 9 verifies what that flow offers.
 - On every pull request: fmt, clippy, tests on the three OSes, cargo-deny, short fuzz run.
-- On tag vX.Y.Z: build and package matrix, sign, draft Release with SHA-256 sums, changelog and attestations. Always rehearse with -rc tags first.
+- Releases (see ADR 0003): after CI passes on a push to main, the Release workflow runs. Without "[release]" in the commit message it updates one rolling pre-release `nightly`. With "[release]" it publishes `vX.Y.Z` (the `version` in Cargo.toml) directly, no drafts, and fails if that tag exists; a version with a hyphen (-rc.1, -beta.1) is a pre-release, otherwise stable and Latest. Pull requests never release. Every release has SHA256SUMS, a `--version` smoke test per binary and generated notes. Signing and attestations join this pipeline when their accounts are approved. Rehearse with -rc versions first.
 - Signing: SignPath Foundation on Windows (MSIX needs two signatures), Apple Developer on macOS, own key stored as a secret on Android. The pipeline must work unsigned until SignPath approves the project.
 - Practices: Cargo.lock committed, --locked everywhere, actions pinned by hash, secrets unavailable to forks, protected release environment.
 - Repo must contain LICENSE, third-party notices (cargo-deny), README with Slint attribution and SignPath credit, SECURITY.md, CONTRIBUTING.md.

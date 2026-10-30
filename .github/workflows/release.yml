@@ -1,60 +1,98 @@
 name: Release
 
-# Every commit that passes CI on main becomes a release with the next version number.
-# Versions are MAJOR.MINOR from Cargo.toml plus a patch that grows by one per release:
-# 0.1.0, 0.1.1, 0.1.2, ... Bump MINOR in Cargo.toml to start a new series at .0.
-# Put [skip release] in a commit message to publish nothing for that commit.
+# Runs after CI succeeds on a push to main (never for pull requests). See docs/RELEASING.md
+# and docs/adr/0003-release-flow.md.
+#
+#   commit message WITHOUT "[release]" -> rolling pre-release `nightly` (tag moved, assets replaced)
+#   commit message WITH    "[release]" -> vX.Y.Z from Cargo.toml, published directly; fails if the tag exists
 
 on:
   workflow_run:
     workflows: [CI]
     types: [completed]
     branches: [main]
-  workflow_dispatch:
 
 permissions:
   contents: read
 
-# Two releases must never pick the same number.
+# Releases and nightly updates are applied one at a time, in order.
 concurrency:
   group: release
   cancel-in-progress: false
 
 jobs:
-  version:
-    name: Next version
+  plan:
+    name: Plan
+    # A fork's pull request can have head_branch "main", so check the event and the repository too.
     if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.event == 'push' &&
-       !contains(github.event.workflow_run.head_commit.message, '[skip release]'))
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ubuntu-latest
     outputs:
-      tag: ${{ steps.next.outputs.tag }}
-      version: ${{ steps.next.outputs.version }}
-      sha: ${{ steps.next.outputs.sha }}
+      skip: ${{ steps.plan.outputs.skip }}
+      mode: ${{ steps.plan.outputs.mode }}
+      version: ${{ steps.plan.outputs.version }}
+      tag: ${{ steps.plan.outputs.tag }}
+      sha: ${{ steps.plan.outputs.sha }}
+      prerelease: ${{ steps.plan.outputs.prerelease }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
-          fetch-depth: 0
-      - name: Compute the next version
-        id: next
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+      - name: Decide what to publish
+        id: plan
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+          MSG: ${{ github.event.workflow_run.head_commit.message }}
         run: |
+          set -euo pipefail
           base=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)"/\1/')
-          series=${base%.*}
-          last=$(git tag -l "v${series}.*" | sed "s/^v${series}\.//" | grep -E '^[0-9]+$' | sort -n | tail -1 || true)
-          patch=$(( ${last:-(-1)} + 1 ))
-          version="${series}.${patch}"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "tag=v$version" >> "$GITHUB_OUTPUT"
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          echo "Releasing v$version"
+          if ! [[ "$base" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Cargo.toml version '$base' is not a valid X.Y.Z[-pre] version."
+            exit 1
+          fi
+          skip=false
+          if [[ "$MSG" == *"[release]"* ]]; then
+            mode=release
+            version=$base
+            tag="v$version"
+            if gh api "repos/$REPO/git/ref/tags/$tag" >/dev/null 2>&1 \
+               || gh release view "$tag" --repo "$REPO" >/dev/null 2>&1; then
+              echo "::error title=Tag $tag already exists::Version $version was already released. Never overwritten. Bump 'version' in Cargo.toml before using [release] again."
+              exit 1
+            fi
+            if [[ "$version" == *-* ]]; then prerelease=true; else prerelease=false; fi
+          else
+            mode=nightly
+            version="$base-nightly.${SHA:0:7}"
+            tag=nightly
+            prerelease=true
+            # A newer push is already queued behind this one: do not move nightly backwards.
+            tip=$(gh api "repos/$REPO/commits/main" --jq .sha)
+            if [ "$tip" != "$SHA" ]; then
+              echo "main moved on to $tip; leaving nightly to that run."
+              skip=true
+            fi
+          fi
+          {
+            echo "skip=$skip"
+            echo "mode=$mode"
+            echo "version=$version"
+            echo "tag=$tag"
+            echo "sha=$SHA"
+            echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
+          echo "mode=$mode version=$version tag=$tag prerelease=$prerelease skip=$skip"
 
   build:
     name: Build ${{ matrix.name }}
-    needs: version
+    needs: plan
+    if: needs.plan.outputs.skip != 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: true
@@ -64,19 +102,22 @@ jobs:
           - { name: windows-x64, os: windows-latest, ext: zip }
           - { name: macos-arm64, os: macos-latest, ext: tar.gz }
     env:
-      ZSTAR_VERSION: ${{ needs.version.outputs.version }}
+      ZSTAR_VERSION: ${{ needs.plan.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          ref: ${{ needs.version.outputs.sha }}
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Build
         run: cargo build --release --locked -p zstar-cli
       - name: Package
         shell: bash
         run: |
-          pkg="zstar-${{ needs.version.outputs.version }}-${{ matrix.name }}"
+          pkg="zstar-$ZSTAR_VERSION-${{ matrix.name }}"
           mkdir "$pkg"
           cp LICENSE README.md DEPENDENCIES.md "$pkg/"
           if [ "${{ runner.os }}" = "Windows" ]; then
@@ -90,40 +131,95 @@ jobs:
       - name: Smoke test the packaged binary
         shell: bash
         run: |
-          bin="zstar-${{ needs.version.outputs.version }}-${{ matrix.name }}/zstar"
+          bin="zstar-$ZSTAR_VERSION-${{ matrix.name }}/zstar"
           [ -f "$bin.exe" ] && bin="$bin.exe"
           out=$("$bin" --version)
           echo "$out"
-          [ "$out" = "zstar ${{ needs.version.outputs.version }}" ]
-      - uses: actions/upload-artifact@v4
+          [ "$out" = "zstar $ZSTAR_VERSION" ]
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ matrix.name }}
           path: ${{ env.ASSET }}
           if-no-files-found: error
 
   publish:
-    name: Publish release
-    needs: [version, build]
+    name: Publish ${{ needs.plan.outputs.tag }}
+    needs: [plan, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      MODE: ${{ needs.plan.outputs.mode }}
+      VERSION: ${{ needs.plan.outputs.version }}
+      TAG: ${{ needs.plan.outputs.tag }}
+      SHA: ${{ needs.plan.outputs.sha }}
+      PRERELEASE: ${{ needs.plan.outputs.prerelease }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: dist
           merge-multiple: true
       - name: Checksums
         working-directory: dist
-        run: sha256sum zstar-* > SHA256SUMS
-      - name: Create the release
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          # Versions below 1.0 are marked as pre-releases.
-          flags=""
-          case "${{ needs.version.outputs.version }}" in 0.*) flags="--prerelease" ;; esac
-          gh release create "${{ needs.version.outputs.tag }}" dist/* \
-            --repo "${{ github.repository }}" \
-            --target "${{ needs.version.outputs.sha }}" \
-            --title "Zstar ${{ needs.version.outputs.version }}" \
-            --generate-notes $flags
+          set -euo pipefail
+          [ "$(ls zstar-* | wc -l)" -eq 3 ] || { echo "::error::Expected 3 archives."; ls -l; exit 1; }
+          sha256sum zstar-* > SHA256SUMS
+          cat SHA256SUMS
+      - name: Generate notes
+        run: |
+          set -euo pipefail
+          # Base the notes on the previous published release, never on nightly or on this tag.
+          prev=$(gh release list --repo "$REPO" --exclude-drafts --limit 100 --json tagName,publishedAt \
+            --jq "[.[] | select(.tagName != \"nightly\" and .tagName != \"$TAG\")] | sort_by(.publishedAt) | reverse | .[0].tagName // empty")
+          args=(-f "tag_name=$TAG" -f "target_commitish=$SHA")
+          [ -n "$prev" ] && args+=(-f "previous_tag_name=$prev")
+          if [ "$MODE" = nightly ]; then
+            printf 'Rolling build of `main` at %s (`%s`). Replaced on every push to main; not a release.\n\n' "${SHA:0:7}" "$VERSION" > notes.md
+          else
+            : > notes.md
+          fi
+          gh api -X POST "repos/$REPO/releases/generate-notes" "${args[@]}" --jq .body >> notes.md
+      - name: Publish nightly
+        if: env.MODE == 'nightly'
+        run: |
+          set -euo pipefail
+          # Move the tag.
+          if gh api "repos/$REPO/git/ref/tags/nightly" >/dev/null 2>&1; then
+            gh api -X PATCH "repos/$REPO/git/refs/tags/nightly" -f "sha=$SHA" -F force=true >/dev/null
+          else
+            gh api -X POST "repos/$REPO/git/refs" -f "ref=refs/tags/nightly" -f "sha=$SHA" >/dev/null
+          fi
+          title="Nightly ${SHA:0:7}"
+          if gh release view nightly --repo "$REPO" >/dev/null 2>&1; then
+            old=$(gh release view nightly --repo "$REPO" --json assets --jq '.assets[].name')
+            gh release upload nightly dist/* --repo "$REPO" --clobber
+            # Drop the previous build's assets (their names carry the old sha).
+            for a in $old; do
+              [ -e "dist/$a" ] || gh release delete-asset nightly "$a" --repo "$REPO" --yes
+            done
+            gh release edit nightly --repo "$REPO" --title "$title" --notes-file notes.md \
+              --prerelease --latest=false
+          else
+            gh release create nightly dist/* --repo "$REPO" --verify-tag --title "$title" \
+              --notes-file notes.md --prerelease --latest=false
+          fi
+      - name: Publish release
+        if: env.MODE == 'release'
+        run: |
+          set -euo pipefail
+          # Builds take minutes: check again right before creating anything.
+          if gh api "repos/$REPO/git/ref/tags/$TAG" >/dev/null 2>&1 \
+             || gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            echo "::error title=Tag $TAG already exists::Refusing to overwrite it."
+            exit 1
+          fi
+          if [ "$PRERELEASE" = true ]; then
+            flags=(--prerelease --latest=false)
+          else
+            flags=(--latest)
+          fi
+          gh release create "$TAG" dist/* --repo "$REPO" --target "$SHA" \
+            --title "Zstar $VERSION" --notes-file notes.md "${flags[@]}"

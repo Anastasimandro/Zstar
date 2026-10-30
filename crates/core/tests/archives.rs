@@ -86,7 +86,19 @@ fn names_differing_only_by_case_extract_safely_with_many_threads() {
         threads: 8,
         ..Options::default()
     };
-    extract(&mut Cursor::new(z.finish()), tmp.path(), &o).unwrap();
+    let r = extract(&mut Cursor::new(z.finish()), tmp.path(), &o);
+    let probe = tmp.path().join("probe");
+    fs::write(&probe, b"").unwrap();
+    if tmp.path().join("PROBE").exists() {
+        // Case-insensitive file system: the second name must not silently replace the first.
+        assert!(r.is_err(), "{r:?}");
+        assert_eq!(
+            fs::read(tmp.path().join("A.txt")).unwrap(),
+            pseudo(300_000, 1)
+        );
+        return;
+    }
+    r.unwrap();
     assert_eq!(
         fs::read(tmp.path().join("A.txt")).unwrap(),
         pseudo(300_000, 1)

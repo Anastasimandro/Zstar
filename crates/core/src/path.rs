@@ -95,7 +95,9 @@ pub fn sanitize(name: &[u8], windows_rules: bool) -> Result<PathBuf> {
             b".." => return Err(unsafe_path(name, "contains a '..' component")),
             _ => {}
         }
-        if windows_rules {
+        // On Windows `PathBuf::push("b:c")` treats it as a drive prefix and replaces the
+        // whole path, so the Windows rules are not optional there.
+        if windows_rules || cfg!(windows) {
             check_windows_component(name, component)?;
         }
         out.push(component_to_os(component));
@@ -160,7 +162,11 @@ mod tests {
             assert!(rejected(n, false), "{n} should be rejected");
         }
         // A colon later in the name is an ordinary character off Windows.
-        assert_eq!(ok("a/b:c"), "a/b:c");
+        if cfg!(windows) {
+            assert!(rejected("a/b:c", false));
+        } else {
+            assert_eq!(ok("a/b:c"), "a/b:c");
+        }
     }
 
     #[test]

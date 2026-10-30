@@ -417,7 +417,7 @@ checksum = "b268e58e7c693d7c271f93ffc4ba3b380412554231c85bf61ca7af91042a4112"
 
 [[package]]
 name = "zstar-cli"
-version = "0.1.0"
+version = "0.1.1-rc.1"
 dependencies = [
  "ctrlc",
  "lexopt",
@@ -427,7 +427,7 @@ dependencies = [
 
 [[package]]
 name = "zstar-core"
-version = "0.1.0"
+version = "0.1.1-rc.1"
 dependencies = [
  "flate2",
  "tar",

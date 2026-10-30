@@ -96,8 +96,11 @@ pub fn sanitize(name: &[u8], windows_rules: bool) -> Result<PathBuf> {
             _ => {}
         }
         // On Windows `PathBuf::push("b:c")` treats it as a drive prefix and replaces the
-        // whole path, so the Windows rules are not optional there.
-        if windows_rules || cfg!(windows) {
+        // whole path, so a colon is never allowed there, whatever the rules say.
+        if cfg!(windows) && component.contains(&b':') {
+            return Err(unsafe_path(name, "contains ':'"));
+        }
+        if windows_rules {
             check_windows_component(name, component)?;
         }
         out.push(component_to_os(component));

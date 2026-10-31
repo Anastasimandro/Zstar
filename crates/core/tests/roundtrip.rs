@@ -146,12 +146,7 @@ fn compression_levels_are_validated_per_format() {
     };
     for f in all_formats() {
         let out = tmp.path().join(format!("o.{}", ext(f)));
-        let valid = match f {
-            Format::Tar => None,
-            Format::TarZst => Some((1, 22)),
-            _ => Some((0, 9)),
-        };
-        match valid {
+        match level_range(f) {
             None => assert!(matches!(
                 create_file(f, std::slice::from_ref(&src), &out, &level(5)),
                 Err(Error::InvalidOption(_))

@@ -8,17 +8,25 @@ license.workspace = true
 authors.workspace = true
 
 [features]
-default = ["zip", "tar", "gzip", "zstd"]
+default = ["zip", "tar", "gzip", "zstd", "bzip2", "xz", "lz4", "brotli"]
 zip = ["dep:zip"]
 tar = ["dep:tar"]
 gzip = ["dep:flate2"]
 zstd = ["dep:zstd"]
+bzip2 = ["dep:bzip2"]
+xz = ["dep:lzma-rust2"]
+lz4 = ["dep:lz4_flex"]
+brotli = ["dep:brotli"]
 
 [dependencies]
 flate2 = { workspace = true, optional = true }
 tar = { workspace = true, optional = true }
 zip = { workspace = true, optional = true }
 zstd = { workspace = true, optional = true }
+bzip2 = { workspace = true, optional = true }
+lzma-rust2 = { workspace = true, optional = true }
+lz4_flex = { workspace = true, optional = true }
+brotli = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -19,28 +19,53 @@ pub enum Format {
     TarGz,
     /// Zstandard-compressed tar.
     TarZst,
+    /// Bzip2-compressed tar.
+    TarBz2,
+    /// XZ-compressed tar.
+    TarXz,
+    /// LZ4-compressed tar.
+    TarLz4,
     /// A single file compressed with gzip.
     Gz,
     /// A single file compressed with Zstandard.
     Zst,
+    /// A single file compressed with bzip2.
+    Bz2,
+    /// A single file compressed with XZ.
+    Xz,
+    /// A single file compressed with LZ4 (frame format).
+    Lz4,
+    /// A single file compressed with Brotli. Brotli streams carry no signature, so this one
+    /// is recognised by the file name only.
+    Br,
 }
 
 impl Format {
     /// Every format, whether or not this build supports it. The tar variants come before the
     /// single-file ones so that `a.tar.gz` is matched as tar.gz and not as gz.
-    pub const ALL: [Format; 6] = [
+    pub const ALL: [Format; 13] = [
         Format::Zip,
         Format::Tar,
         Format::TarGz,
         Format::TarZst,
+        Format::TarBz2,
+        Format::TarXz,
+        Format::TarLz4,
         Format::Gz,
         Format::Zst,
+        Format::Bz2,
+        Format::Xz,
+        Format::Lz4,
+        Format::Br,
     ];
 
     /// True for formats that compress one file with no container around it. They accept
     /// exactly one regular file and cannot hold directories.
     pub fn is_single_file(self) -> bool {
-        matches!(self, Format::Gz | Format::Zst)
+        matches!(
+            self,
+            Format::Gz | Format::Zst | Format::Bz2 | Format::Xz | Format::Lz4 | Format::Br
+        )
     }
 
     /// Short human-readable name, also accepted by [`Format::from_name`].
@@ -50,8 +75,15 @@ impl Format {
             Format::Tar => "tar",
             Format::TarGz => "tar.gz",
             Format::TarZst => "tar.zst",
+            Format::TarBz2 => "tar.bz2",
+            Format::TarXz => "tar.xz",
+            Format::TarLz4 => "tar.lz4",
             Format::Gz => "gz",
             Format::Zst => "zst",
+            Format::Bz2 => "bz2",
+            Format::Xz => "xz",
+            Format::Lz4 => "lz4",
+            Format::Br => "br",
         }
     }
 
@@ -67,8 +99,15 @@ impl Format {
             Format::Tar => &["tar"],
             Format::TarGz => &["tar.gz", "tgz"],
             Format::TarZst => &["tar.zst", "tzst", "tar.zstd"],
+            Format::TarBz2 => &["tar.bz2", "tbz2", "tbz", "tar.bz"],
+            Format::TarXz => &["tar.xz", "txz"],
+            Format::TarLz4 => &["tar.lz4", "tlz4"],
             Format::Gz => &["gz"],
             Format::Zst => &["zst", "zstd"],
+            Format::Bz2 => &["bz2"],
+            Format::Xz => &["xz"],
+            Format::Lz4 => &["lz4"],
+            Format::Br => &["br"],
         }
     }
 
@@ -165,10 +204,24 @@ pub fn handler(format: Format) -> Result<&'static dyn ArchiveFormat> {
         Format::TarGz => Ok(&crate::formats::tar_format::TarFormat::GZIP),
         #[cfg(all(feature = "tar", feature = "zstd"))]
         Format::TarZst => Ok(&crate::formats::tar_format::TarFormat::ZSTD),
+        #[cfg(all(feature = "tar", feature = "bzip2"))]
+        Format::TarBz2 => Ok(&crate::formats::tar_format::TarFormat::BZIP2),
+        #[cfg(all(feature = "tar", feature = "xz"))]
+        Format::TarXz => Ok(&crate::formats::tar_format::TarFormat::XZ),
+        #[cfg(all(feature = "tar", feature = "lz4"))]
+        Format::TarLz4 => Ok(&crate::formats::tar_format::TarFormat::LZ4),
         #[cfg(feature = "gzip")]
         Format::Gz => Ok(&crate::formats::single::SingleFormat::GZ),
         #[cfg(feature = "zstd")]
         Format::Zst => Ok(&crate::formats::single::SingleFormat::ZST),
+        #[cfg(feature = "bzip2")]
+        Format::Bz2 => Ok(&crate::formats::single::SingleFormat::BZ2),
+        #[cfg(feature = "xz")]
+        Format::Xz => Ok(&crate::formats::single::SingleFormat::XZ),
+        #[cfg(feature = "lz4")]
+        Format::Lz4 => Ok(&crate::formats::single::SingleFormat::LZ4),
+        #[cfg(feature = "brotli")]
+        Format::Br => Ok(&crate::formats::single::SingleFormat::BR),
         #[allow(unreachable_patterns)]
         other => Err(Error::FeatureDisabled(other)),
     }
@@ -194,6 +247,14 @@ mod tests {
         assert_eq!(f("a.txt.ZST"), Some(Format::Zst));
         assert_eq!(f("a.tar.gz"), Some(Format::TarGz), "tar.gz wins over gz");
         assert_eq!(f(".gz"), None);
+        assert_eq!(f("a.tar.bz2"), Some(Format::TarBz2));
+        assert_eq!(f("a.TBZ2"), Some(Format::TarBz2));
+        assert_eq!(f("a.tar.xz"), Some(Format::TarXz));
+        assert_eq!(f("a.tar.lz4"), Some(Format::TarLz4));
+        assert_eq!(f("a.bz2"), Some(Format::Bz2));
+        assert_eq!(f("a.xz"), Some(Format::Xz));
+        assert_eq!(f("a.lz4"), Some(Format::Lz4));
+        assert_eq!(f("a.br"), Some(Format::Br));
     }
 
     #[test]

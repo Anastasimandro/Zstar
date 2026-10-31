@@ -9,6 +9,9 @@
 //! * symbolic links are created last and verified to resolve inside the root;
 //! * permissions never gain setuid/setgid/sticky or group/other write bits.
 
+// A build with only single-file formats never creates directories, links or several entries.
+#![cfg_attr(not(any(feature = "zip", feature = "tar")), allow(dead_code))]
+
 use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};

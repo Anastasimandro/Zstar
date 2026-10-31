@@ -4,10 +4,14 @@ use std::io::{Read, SeekFrom};
 
 use crate::error::{Error, Result};
 use crate::format::{Format, ReadSeek};
+use crate::formats::codec::Codec;
 
 const ZIP_MAGICS: [&[u8]; 2] = [b"PK\x03\x04", b"PK\x05\x06"];
 const GZIP_MAGIC: &[u8] = &[0x1f, 0x8b];
 const ZSTD_MAGIC: &[u8] = &[0x28, 0xb5, 0x2f, 0xfd];
+const BZIP2_MAGIC: &[u8] = b"BZh"; // followed by the block size digit '1'..='9'
+const XZ_MAGIC: &[u8] = &[0xfd, b'7', b'z', b'X', b'Z', 0x00];
+const LZ4_MAGIC: &[u8] = &[0x04, 0x22, 0x4d, 0x18];
 const TAR_BLOCK: usize = 512;
 
 /// True when `block` is a tar header: its checksum field matches the sum of its bytes.
@@ -56,21 +60,57 @@ fn read_head(input: &mut dyn Read, buf: &mut [u8]) -> Result<usize> {
     Ok(n)
 }
 
-/// First tar block of the decompressed stream, or an error when decompression fails.
-#[cfg(any(feature = "gzip", feature = "zstd"))]
+/// Whether the first block of the decompressed stream is a tar header. A stream that fails
+/// to decode in that block is simply "not a tar".
 fn tar_inside(decoder: &mut dyn Read) -> Result<bool> {
     let mut block = [0u8; TAR_BLOCK];
-    // A stream that fails to decode in the first block is simply "not a tar".
     let n = read_head(decoder, &mut block).unwrap_or(0);
     Ok(is_tar_header(&block[..n]))
 }
 
+/// The single-file and tar formats that share the compressor `head` starts with, if any.
+fn signature(head: &[u8]) -> Option<(Format, Format)> {
+    if head.starts_with(GZIP_MAGIC) {
+        Some((Format::Gz, Format::TarGz))
+    } else if head.starts_with(ZSTD_MAGIC) {
+        Some((Format::Zst, Format::TarZst))
+    } else if head.starts_with(BZIP2_MAGIC)
+        && head.get(3).is_some_and(|b| (b'1'..=b'9').contains(b))
+    {
+        Some((Format::Bz2, Format::TarBz2))
+    } else if head.starts_with(XZ_MAGIC) {
+        Some((Format::Xz, Format::TarXz))
+    } else if head.starts_with(LZ4_MAGIC) {
+        Some((Format::Lz4, Format::TarLz4))
+    } else {
+        None
+    }
+}
+
+/// The codec behind a single-file format, when this build has it.
+fn codec_for(single: Format) -> Option<Codec> {
+    match single {
+        #[cfg(feature = "gzip")]
+        Format::Gz => Some(Codec::Gzip),
+        #[cfg(feature = "zstd")]
+        Format::Zst => Some(Codec::Zstd),
+        #[cfg(feature = "bzip2")]
+        Format::Bz2 => Some(Codec::Bzip2),
+        #[cfg(feature = "xz")]
+        Format::Xz => Some(Codec::Xz),
+        #[cfg(feature = "lz4")]
+        Format::Lz4 => Some(Codec::Lz4),
+        _ => None,
+    }
+}
+
 /// Identifies the archive format of `input` and rewinds it to the start.
 ///
-/// Gzip and Zstandard streams are reported as tar archives when their first decompressed
-/// block is a valid tar header, and as single compressed files (gz, zst) otherwise. Only the
-/// magic bytes and that first block are checked, so a corrupt stream is still detected here
-/// and fails later, when it is read.
+/// Compressed streams are reported as tar archives when their first decompressed block is a
+/// valid tar header, and as single compressed files (gz, zst, bz2, xz, lz4) otherwise. Only
+/// the magic bytes and that first block are checked, so a corrupt stream is still detected
+/// here and fails later, when it is read. Brotli has no magic bytes and is never detected
+/// here; see [`detect_named`].
 pub fn detect(input: &mut dyn ReadSeek) -> Result<Format> {
     input.seek(SeekFrom::Start(0))?;
     let mut head = [0u8; TAR_BLOCK];
@@ -81,30 +121,15 @@ pub fn detect(input: &mut dyn ReadSeek) -> Result<Format> {
     if ZIP_MAGICS.iter().any(|m| head.starts_with(m)) {
         return Ok(Format::Zip);
     }
-    if head.starts_with(GZIP_MAGIC) {
-        #[cfg(feature = "gzip")]
-        {
-            let mut dec = flate2::read::MultiGzDecoder::new(&mut *input);
-            let is_tar = tar_inside(&mut dec)?;
-            drop(dec);
-            input.seek(SeekFrom::Start(0))?;
-            return Ok(if is_tar { Format::TarGz } else { Format::Gz });
-        }
-        #[cfg(not(feature = "gzip"))]
-        return Err(Error::FeatureDisabled(Format::Gz));
-    }
-    if head.starts_with(ZSTD_MAGIC) {
-        #[cfg(feature = "zstd")]
-        {
-            let is_tar = match zstd::stream::read::Decoder::new(&mut *input) {
-                Ok(mut dec) => tar_inside(&mut dec)?,
-                Err(_) => false,
-            };
-            input.seek(SeekFrom::Start(0))?;
-            return Ok(if is_tar { Format::TarZst } else { Format::Zst });
-        }
-        #[cfg(not(feature = "zstd"))]
-        return Err(Error::FeatureDisabled(Format::Zst));
+    if let Some((single, tar)) = signature(head) {
+        let Some(codec) = codec_for(single) else {
+            return Err(Error::FeatureDisabled(single));
+        };
+        let is_tar = codec
+            .with_reader(input, |reader| tar_inside(reader))
+            .unwrap_or(false);
+        input.seek(SeekFrom::Start(0))?;
+        return Ok(if is_tar { tar } else { single });
     }
     if is_tar_header(head) {
         return Ok(Format::Tar);
@@ -112,6 +137,22 @@ pub fn detect(input: &mut dyn ReadSeek) -> Result<Format> {
     Err(Error::UnsupportedFormat(
         "unrecognised file signature".into(),
     ))
+}
+
+/// Like [`detect`], but falls back to the file name for formats that have no signature
+/// (Brotli, `.br`). The name is only consulted when the content matches nothing else.
+pub fn detect_named(input: &mut dyn ReadSeek, name: Option<&str>) -> Result<Format> {
+    match detect(input) {
+        Err(Error::UnsupportedFormat(_)) if name.is_some_and(is_brotli_name) => Ok(Format::Br),
+        other => other,
+    }
+}
+
+fn is_brotli_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower
+        .strip_suffix(".br")
+        .is_some_and(|stem| !stem.is_empty())
 }
 
 #[cfg(test)]

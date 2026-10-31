@@ -9,6 +9,9 @@ allow = [
     "Zlib",
     "Unicode-3.0",
     "Unlicense",
+    # libbz2-rs-sys (pure-Rust bzip2). Permissive BSD-style licence of the original bzip2:
+    # keep the notice, do not misrepresent the origin, no endorsement. No copyleft.
+    "bzip2-1.0.6",
     "GPL-3.0-only", # the workspace crates themselves
 ]
 

@@ -14,7 +14,19 @@
 
 #![forbid(unsafe_code)]
 // Without any format feature the engine has nothing to drive; keep that build warning-free.
-#![cfg_attr(not(any(feature = "zip", feature = "tar")), allow(dead_code))]
+#![cfg_attr(
+    not(any(
+        feature = "zip",
+        feature = "tar",
+        feature = "gzip",
+        feature = "zstd",
+        feature = "bzip2",
+        feature = "xz",
+        feature = "lz4",
+        feature = "brotli"
+    )),
+    allow(dead_code)
+)]
 
 mod detect;
 mod error;
@@ -31,7 +43,7 @@ mod timeconv;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 
-pub use detect::detect;
+pub use detect::{detect, detect_named};
 pub use error::{Error, LimitKind, Result};
 pub use extract::Summary;
 pub use format::{ArchiveFormat, EntryInfo, EntryKind, Format, ReadSeek, WriteSeek, handler};
@@ -40,19 +52,23 @@ pub use path::sanitize as sanitize_entry_name;
 pub use sources::{SourceEntry, collect_sources};
 
 /// Lists the entries of an archive, detecting its format first.
+///
+/// Brotli has no signature, so it is only recognised through [`Options::name_hint`].
 pub fn list(
     input: &mut dyn ReadSeek,
     opts: &Options,
     visit: &mut dyn FnMut(EntryInfo),
 ) -> Result<Format> {
-    let format = detect(input)?;
+    let format = detect_named(input, opts.name_hint.as_deref())?;
     handler(format)?.list(input, opts, visit)?;
     Ok(format)
 }
 
 /// Extracts an archive into `dest`, detecting its format first.
+///
+/// Brotli has no signature, so it is only recognised through [`Options::name_hint`].
 pub fn extract(input: &mut dyn ReadSeek, dest: &Path, opts: &Options) -> Result<Summary> {
-    let format = detect(input)?;
+    let format = detect_named(input, opts.name_hint.as_deref())?;
     handler(format)?.extract(input, dest, opts)
 }
 

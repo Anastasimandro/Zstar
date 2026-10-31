@@ -33,9 +33,11 @@ COMMON OPTIONS:
     -V, --version          show the version
 
 compress:
-    -l, --level <N>        compression level (zip/gz: 0-9, zst: 1-22)
-        --format <NAME>    zip, tar, tar.gz, tar.zst, gz or zst (default: from the file name)
-                           gz and zst compress exactly one file
+    -l, --level <N>        compression level (zip/gz/xz: 0-9, bz2: 1-9, zst: 1-22,
+                           br: 0-11; lz4 has none)
+        --format <NAME>    zip, tar, tar.gz, tar.bz2, tar.xz, tar.zst, tar.lz4, or one of
+                           gz, bz2, xz, zst, lz4, br (default: from the file name).
+                           The single-file formats compress exactly one file.
 
 extract:
     -o, --output <DIR>     destination directory (default: current directory)
@@ -44,7 +46,8 @@ extract:
         --max-ratio <N>    stop above this output:archive ratio, 0 = off (default 500)
         --no-limits        disable all bomb protection (trusted archives only)
 
-The archive format is detected from its contents, never from its name.";
+The archive format is detected from its contents, never from its name, except for
+Brotli (.br), which has no signature and is recognised by its file name.";
 
 enum Cmd {
     Compress {

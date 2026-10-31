@@ -25,6 +25,18 @@ pub fn single_formats() -> Vec<Format> {
         .collect()
 }
 
+/// Valid compression levels `(lowest, highest)`, or `None` when the format takes no level.
+pub fn level_range(format: Format) -> Option<(i32, i32)> {
+    match format {
+        Format::Zip | Format::TarGz | Format::Gz | Format::Xz | Format::TarXz => Some((0, 9)),
+        Format::TarZst | Format::Zst => Some((1, 22)),
+        Format::TarBz2 | Format::Bz2 => Some((1, 9)),
+        Format::Br => Some((0, 11)),
+        Format::Tar | Format::TarLz4 | Format::Lz4 => None,
+        _ => unreachable!("unlisted format {format:?}"),
+    }
+}
+
 pub fn ext(format: Format) -> &'static str {
     format.extensions()[0]
 }

@@ -32,7 +32,13 @@ fn round_trip_names_the_output_after_the_archive() {
         let data = pseudo(3 << 20, 11);
         let archive = make(f, tmp.path(), "report.bin", &data);
         assert!(find_part_files(tmp.path()).is_empty(), "{f:?}");
-        assert_eq!(detect(&mut fs::File::open(&archive).unwrap()).unwrap(), f);
+        if f == Format::Br {
+            // No signature: detection by content alone must say so, not guess.
+            let r = detect(&mut fs::File::open(&archive).unwrap());
+            assert!(matches!(r, Err(Error::UnsupportedFormat(_))), "{r:?}");
+        } else {
+            assert_eq!(detect(&mut fs::File::open(&archive).unwrap()).unwrap(), f);
+        }
 
         let dest = tmp.path().join("out");
         let s = extract_file(&archive, &dest, &Options::default()).unwrap();
@@ -73,8 +79,13 @@ fn streams_use_the_hint_or_a_default_name() {
         let bytes = fs::read(&archive).unwrap();
 
         let dest = tmp.path().join("no-hint");
-        extract(&mut Cursor::new(bytes.clone()), &dest, &Options::default()).unwrap();
-        assert_eq!(fs::read(dest.join("data")).unwrap(), b"hello");
+        let r = extract(&mut Cursor::new(bytes.clone()), &dest, &Options::default());
+        if f == Format::Br {
+            assert!(matches!(r, Err(Error::UnsupportedFormat(_))), "{r:?}");
+        } else {
+            r.unwrap();
+            assert_eq!(fs::read(dest.join("data")).unwrap(), b"hello");
+        }
 
         let dest = tmp.path().join("hint");
         let opts = Options {
@@ -93,6 +104,11 @@ fn an_archive_without_a_known_extension_does_not_overwrite_itself() {
         let archive = make(f, tmp.path(), "a.txt", b"hello");
         let renamed = tmp.path().join("blob");
         fs::rename(&archive, &renamed).unwrap();
+        if f == Format::Br {
+            let r = extract_file(&renamed, tmp.path(), &Options::default());
+            assert!(matches!(r, Err(Error::UnsupportedFormat(_))), "{r:?}");
+            continue;
+        }
         extract_file(&renamed, tmp.path(), &Options::default()).unwrap();
         assert_eq!(fs::read(tmp.path().join("blob.out")).unwrap(), b"hello");
         assert_eq!(
@@ -241,8 +257,17 @@ fn levels_are_validated() {
         let tmp = tempfile::tempdir().unwrap();
         let src = tmp.path().join("f.txt");
         write(&src, &vec![b'a'; 100_000]);
-        let (lo, hi) = if f == Format::Zst { (1, 22) } else { (0, 9) };
         let out = tmp.path().join(format!("o.{}", ext(f)));
+        let Some((lo, hi)) = level_range(f) else {
+            let o = Options {
+                level: Some(3),
+                ..Options::default()
+            };
+            let r = create_file(f, std::slice::from_ref(&src), &out, &o);
+            assert!(matches!(r, Err(Error::InvalidOption(_))), "{f:?}: {r:?}");
+            assert!(!out.exists());
+            continue;
+        };
         for (level, ok) in [(lo, true), (hi, true), (lo - 1, false), (hi + 1, false)] {
             let o = Options {
                 level: Some(level),
@@ -277,7 +302,7 @@ fn existing_output_is_kept_unless_overwrite_is_on() {
 #[test]
 fn concatenated_members_extract_as_one_file() {
     // `cat a.gz b.gz` is a valid gzip file, and likewise for zstd frames.
-    for f in single_formats() {
+    for f in single_formats().into_iter().filter(|&f| f != Format::Br) {
         let tmp = tempfile::tempdir().unwrap();
         let a = make(f, tmp.path(), "a", b"first-");
         let b = make(f, tmp.path(), "b", b"second");

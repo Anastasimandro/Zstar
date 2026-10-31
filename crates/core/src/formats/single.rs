@@ -33,6 +33,27 @@ impl SingleFormat {
         format: Format::Zst,
     };
 
+    #[cfg(feature = "bzip2")]
+    pub(crate) const BZ2: SingleFormat = SingleFormat {
+        codec: Codec::Bzip2,
+        format: Format::Bz2,
+    };
+    #[cfg(feature = "xz")]
+    pub(crate) const XZ: SingleFormat = SingleFormat {
+        codec: Codec::Xz,
+        format: Format::Xz,
+    };
+    #[cfg(feature = "lz4")]
+    pub(crate) const LZ4: SingleFormat = SingleFormat {
+        codec: Codec::Lz4,
+        format: Format::Lz4,
+    };
+    #[cfg(feature = "brotli")]
+    pub(crate) const BR: SingleFormat = SingleFormat {
+        codec: Codec::Brotli,
+        format: Format::Br,
+    };
+
     /// Name of the extracted file: the archive's name without its extension.
     ///
     /// A stream has no file name, so [`Options::name_hint`] supplies it; without one, or when

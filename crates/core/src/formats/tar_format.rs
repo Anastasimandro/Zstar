@@ -1,7 +1,7 @@
 //! tar, optionally wrapped in a streaming compressor (see [`Codec`]).
 //!
 //! Everything is streamed through fixed buffers: memory use does not depend on archive or
-//! entry size. tar itself is sequential, so only zstd compression uses extra threads.
+//! entry size. tar itself is sequential, so only zstd and xz compression use extra threads.
 
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Write};
@@ -43,6 +43,22 @@ impl TarFormat {
     pub(crate) const ZSTD: TarFormat = TarFormat {
         codec: Some(Codec::Zstd),
         format: Format::TarZst,
+    };
+
+    #[cfg(feature = "bzip2")]
+    pub(crate) const BZIP2: TarFormat = TarFormat {
+        codec: Some(Codec::Bzip2),
+        format: Format::TarBz2,
+    };
+    #[cfg(feature = "xz")]
+    pub(crate) const XZ: TarFormat = TarFormat {
+        codec: Some(Codec::Xz),
+        format: Format::TarXz,
+    };
+    #[cfg(feature = "lz4")]
+    pub(crate) const LZ4: TarFormat = TarFormat {
+        codec: Some(Codec::Lz4),
+        format: Format::TarLz4,
     };
 
     /// Runs `f` on the decompressed byte stream.

@@ -29,6 +29,7 @@
     allow(dead_code)
 )]
 
+pub mod config;
 mod detect;
 mod error;
 mod extract;

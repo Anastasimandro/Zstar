@@ -27,6 +27,7 @@ USAGE:
     zstar list     [OPTIONS] <ARCHIVE>
 
 COMMON OPTIONS:
+        --config <FILE>    TOML settings (default: the user config file, if it exists)
     -j, --threads <N>      worker threads (default: one per CPU)
     -f, --force            overwrite existing files
     -h, --help             show this help
@@ -72,28 +73,56 @@ struct Cli {
 }
 
 fn parse_size(s: &str) -> Result<u64, String> {
-    let (digits, shift) = match s.chars().last() {
-        Some('k' | 'K') => (&s[..s.len() - 1], 10),
-        Some('m' | 'M') => (&s[..s.len() - 1], 20),
-        Some('g' | 'G') => (&s[..s.len() - 1], 30),
-        Some('t' | 'T') => (&s[..s.len() - 1], 40),
-        _ => (s, 0),
+    zstar_core::config::parse_size(s).ok_or_else(|| format!("invalid size '{s}'"))
+}
+
+/// The default config file: `$XDG_CONFIG_HOME/zstar/config.toml` (or `~/.config/...`) on
+/// Unix, `%APPDATA%\\zstar\\config.toml` on Windows. It is optional.
+fn default_config_path() -> Option<PathBuf> {
+    let base = if cfg!(windows) {
+        std::env::var_os("APPDATA").map(PathBuf::from)
+    } else {
+        std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
     };
-    digits
-        .parse::<u64>()
-        .ok()
-        .and_then(|n| n.checked_mul(1 << shift))
-        .ok_or_else(|| format!("invalid size '{s}'"))
+    base.map(|b| b.join("zstar").join("config.toml"))
+}
+
+/// An explicit `--config` file must exist; the default one is used only when present.
+fn load_config(explicit: Option<&std::path::Path>, opts: &mut Options) -> Result<(), String> {
+    let (path, required) = match explicit {
+        Some(p) => (p.to_path_buf(), true),
+        None => match default_config_path() {
+            Some(p) => (p, false),
+            None => return Ok(()),
+        },
+    };
+    match std::fs::read_to_string(&path) {
+        Ok(text) => zstar_core::config::apply_toml(&text, opts)
+            .map_err(|e| format!("{}: {e}", path.display())),
+        Err(e) if !required && e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("{}: {e}", path.display())),
+    }
 }
 
 fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Cli>, String> {
-    let mut p = lexopt::Parser::from_args(args);
     let mut opts = Options::default();
     let mut command: Option<String> = None;
     let mut positional: Vec<PathBuf> = Vec::new();
     let mut output = PathBuf::from(".");
     let mut format = None;
+    let mut config: Option<PathBuf> = None;
     let e = |e: lexopt::Error| e.to_string();
+    let args: Vec<OsString> = args.into_iter().collect();
+    // Flags override the file, so the file is read first: find --config before parsing.
+    for (i, a) in args.iter().enumerate() {
+        if a == "--config" {
+            config = args.get(i + 1).map(PathBuf::from);
+        }
+    }
+    load_config(config.as_deref(), &mut opts)?;
+    let mut p = lexopt::Parser::from_args(args);
 
     while let Some(arg) = p.next().map_err(e)? {
         match arg {
@@ -107,6 +136,9 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Cli>, String
             }
             Short('j') | Long("threads") => {
                 opts.threads = p.value().map_err(e)?.parse().map_err(e)?
+            }
+            Long("config") => {
+                p.value().map_err(e)?;
             }
             Short('f') | Long("force") => opts.overwrite = true,
             Short('l') | Long("level") => {
@@ -206,16 +238,16 @@ fn progress_printer(start: Instant) -> zstar_core::ProgressFn {
 fn hint(e: &Error) -> &'static str {
     match e {
         Error::LimitExceeded(LimitKind::TotalSize) => {
-            "raise it with --max-size, or use --no-limits if you trust the archive"
+            "raise it with --max-size or `max_total_bytes` under [limits] in the config file, or use --no-limits if you trust the archive"
         }
         Error::LimitExceeded(LimitKind::Entries) => {
-            "raise it with --max-entries, or use --no-limits if you trust the archive"
+            "raise it with --max-entries or `max_entries` under [limits] in the config file, or use --no-limits if you trust the archive"
         }
         Error::LimitExceeded(LimitKind::Memory) => {
-            "raise it with --max-memory, or use --no-limits if you trust the archive"
+            "raise it with --max-memory or `max_memory_bytes` under [limits] in the config file, or use --no-limits if you trust the archive"
         }
         Error::LimitExceeded(LimitKind::Ratio) => {
-            "raise it with --max-ratio (0 = off), or use --no-limits if you trust the archive"
+            "raise it with --max-ratio (0 = off) or `max_ratio` under [limits] in the config file, or use --no-limits if you trust the archive"
         }
         Error::AlreadyExists(_) => "use --force to overwrite",
         _ => "",
@@ -368,6 +400,28 @@ mod tests {
             parse(args("list a.zip")).unwrap().unwrap().cmd,
             Cmd::List { .. }
         ));
+    }
+
+    #[test]
+    fn config_file_sets_limits_and_flags_override_it() {
+        let dir = std::env::temp_dir().join(format!("zstar-cfg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("c.toml");
+        std::fs::write(&file, "[limits]\nmax_total_bytes = \"1M\"\nmax_ratio = 7\n").unwrap();
+        let cfg = file.display();
+
+        let c = parse(args(&format!("extract --config {cfg} a.zip")))
+            .unwrap()
+            .unwrap();
+        assert_eq!(c.opts.limits.max_total_bytes, 1 << 20);
+        assert_eq!(c.opts.limits.max_ratio, 7);
+
+        let c = parse(args(&format!("extract --config {cfg} --max-size 2M a.zip")))
+            .unwrap()
+            .unwrap();
+        assert_eq!(c.opts.limits.max_total_bytes, 2 << 20);
+        assert!(parse(args("extract --config /no/such/file.toml a.zip")).is_err());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

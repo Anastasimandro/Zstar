@@ -33,9 +33,9 @@ COMMON OPTIONS:
     -V, --version          show the version
 
 compress:
-    -l, --level <N>        compression level (zip/gz/xz: 0-9, bz2: 1-9, zst: 1-22,
+    -l, --level <N>        compression level (zip/7z/gz/xz: 0-9, bz2: 1-9, zst: 1-22,
                            br: 0-11; lz4 has none)
-        --format <NAME>    zip, tar, tar.gz, tar.bz2, tar.xz, tar.zst, tar.lz4, or one of
+        --format <NAME>    zip, 7z, tar, tar.gz, tar.bz2, tar.xz, tar.zst, tar.lz4, or one of
                            gz, bz2, xz, zst, lz4, br (default: from the file name).
                            The single-file formats compress exactly one file.
 
@@ -44,6 +44,8 @@ extract:
         --max-size <SIZE>  stop after this much output, e.g. 10G (default 64G)
         --max-entries <N>  stop after this many entries (default 10000000)
         --max-ratio <N>    stop above this output:archive ratio, 0 = off (default 500)
+        --max-memory <SIZE>  refuse decoders asking for more memory (xz/7z dictionary),
+                           e.g. 512M (default 1G)
         --no-limits        disable all bomb protection (trusted archives only)
 
 The archive format is detected from its contents, never from its name, except for
@@ -125,6 +127,10 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Cli>, String
             Long("max-ratio") => {
                 opts.limits.max_ratio = p.value().map_err(e)?.parse().map_err(e)?
             }
+            Long("max-memory") => {
+                let v: String = p.value().map_err(e)?.parse().map_err(e)?;
+                opts.limits.max_memory_bytes = parse_size(&v)?;
+            }
             Long("no-limits") => opts.limits = zstar_core::Limits::unlimited(),
             Value(v) if command.is_none() => command = Some(v.string().map_err(e)?),
             Value(v) => positional.push(v.into()),
@@ -204,6 +210,9 @@ fn hint(e: &Error) -> &'static str {
         }
         Error::LimitExceeded(LimitKind::Entries) => {
             "raise it with --max-entries, or use --no-limits if you trust the archive"
+        }
+        Error::LimitExceeded(LimitKind::Memory) => {
+            "raise it with --max-memory, or use --no-limits if you trust the archive"
         }
         Error::LimitExceeded(LimitKind::Ratio) => {
             "raise it with --max-ratio (0 = off), or use --no-limits if you trust the archive"

@@ -5,8 +5,10 @@ use std::io::{Read, SeekFrom};
 use crate::error::{Error, Result};
 use crate::format::{Format, ReadSeek};
 use crate::formats::codec::Codec;
+use crate::options::Limits;
 
 const ZIP_MAGICS: [&[u8]; 2] = [b"PK\x03\x04", b"PK\x05\x06"];
+const SEVENZ_MAGIC: &[u8] = &[b'7', b'z', 0xbc, 0xaf, 0x27, 0x1c];
 const GZIP_MAGIC: &[u8] = &[0x1f, 0x8b];
 const ZSTD_MAGIC: &[u8] = &[0x28, 0xb5, 0x2f, 0xfd];
 const BZIP2_MAGIC: &[u8] = b"BZh"; // followed by the block size digit '1'..='9'
@@ -112,6 +114,12 @@ fn codec_for(single: Format) -> Option<Codec> {
 /// here and fails later, when it is read. Brotli has no magic bytes and is never detected
 /// here; see [`detect_named`].
 pub fn detect(input: &mut dyn ReadSeek) -> Result<Format> {
+    detect_limited(input, Limits::default().max_memory_bytes)
+}
+
+/// [`detect`] with the decoder memory limit of the caller, so that a stream that sizes its
+/// dictionary at will cannot make detection allocate more than extraction would.
+pub(crate) fn detect_limited(input: &mut dyn ReadSeek, max_memory: u64) -> Result<Format> {
     input.seek(SeekFrom::Start(0))?;
     let mut head = [0u8; TAR_BLOCK];
     let n = read_head(input, &mut head)?;
@@ -121,12 +129,18 @@ pub fn detect(input: &mut dyn ReadSeek) -> Result<Format> {
     if ZIP_MAGICS.iter().any(|m| head.starts_with(m)) {
         return Ok(Format::Zip);
     }
+    if head.starts_with(SEVENZ_MAGIC) {
+        #[cfg(feature = "sevenz")]
+        return Ok(Format::SevenZ);
+        #[cfg(not(feature = "sevenz"))]
+        return Err(Error::FeatureDisabled(Format::SevenZ));
+    }
     if let Some((single, tar)) = signature(head) {
         let Some(codec) = codec_for(single) else {
             return Err(Error::FeatureDisabled(single));
         };
         let is_tar = codec
-            .with_reader(input, |reader| tar_inside(reader))
+            .with_reader(input, max_memory, |reader| tar_inside(reader))
             .unwrap_or(false);
         input.seek(SeekFrom::Start(0))?;
         return Ok(if is_tar { tar } else { single });
@@ -142,7 +156,15 @@ pub fn detect(input: &mut dyn ReadSeek) -> Result<Format> {
 /// Like [`detect`], but falls back to the file name for formats that have no signature
 /// (Brotli, `.br`). The name is only consulted when the content matches nothing else.
 pub fn detect_named(input: &mut dyn ReadSeek, name: Option<&str>) -> Result<Format> {
-    match detect(input) {
+    detect_named_limited(input, name, Limits::default().max_memory_bytes)
+}
+
+pub(crate) fn detect_named_limited(
+    input: &mut dyn ReadSeek,
+    name: Option<&str>,
+    max_memory: u64,
+) -> Result<Format> {
+    match detect_limited(input, max_memory) {
         Err(Error::UnsupportedFormat(_)) if name.is_some_and(is_brotli_name) => Ok(Format::Br),
         other => other,
     }
@@ -194,6 +216,8 @@ mod tests {
     fn detects_zip_and_tar_and_rejects_garbage() {
         let mut zip = Cursor::new(b"PK\x03\x04rest".to_vec());
         assert_eq!(detect(&mut zip).unwrap(), Format::Zip);
+        let mut seven = Cursor::new(b"7z\xbc\xaf\x27\x1c\0\x04rest".to_vec());
+        assert_eq!(detect(&mut seven).unwrap(), Format::SevenZ);
         let mut empty_zip = Cursor::new(b"PK\x05\x06\0\0\0\0".to_vec());
         assert_eq!(detect(&mut empty_zip).unwrap(), Format::Zip);
 

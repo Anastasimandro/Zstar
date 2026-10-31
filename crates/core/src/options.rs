@@ -54,6 +54,10 @@ pub struct Limits {
     /// The ratio is only checked once this many bytes have been written, so that small,
     /// highly compressible files do not trip it.
     pub ratio_min_bytes: u64,
+    /// Largest memory a decoder may ask for, in bytes (the dictionary of an xz or 7z/LZMA
+    /// stream). A few bytes of header can otherwise demand gigabytes. `u64::MAX` disables
+    /// the check.
+    pub max_memory_bytes: u64,
 }
 
 impl Limits {
@@ -64,6 +68,7 @@ impl Limits {
             max_entries: u64::MAX,
             max_ratio: 0,
             ratio_min_bytes: 0,
+            max_memory_bytes: u64::MAX,
         }
     }
 }
@@ -75,6 +80,7 @@ impl Default for Limits {
             max_entries: 10_000_000,
             max_ratio: 500,
             ratio_min_bytes: 256 << 20,
+            max_memory_bytes: 1 << 30,
         }
     }
 }

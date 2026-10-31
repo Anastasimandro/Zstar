@@ -53,6 +53,7 @@ impl Codec {
     pub(crate) fn with_reader<T>(
         self,
         _input: &mut dyn ReadSeek,
+        _max_memory: u64,
         _f: impl FnOnce(&mut dyn Read) -> crate::error::Result<T>,
     ) -> crate::error::Result<T> {
         match self {}
@@ -203,8 +204,10 @@ mod imp {
         pub(crate) fn with_reader<T>(
             self,
             input: &mut dyn ReadSeek,
+            max_memory: u64,
             f: impl FnOnce(&mut dyn Read) -> Result<T>,
         ) -> Result<T> {
+            let _ = max_memory; // only xz has a dictionary the stream can size at will
             match self {
                 #[cfg(feature = "gzip")]
                 Codec::Gzip => {
@@ -222,7 +225,9 @@ mod imp {
                 #[cfg(feature = "xz")]
                 Codec::Xz => {
                     let buffered = io::BufReader::with_capacity(READ_BUF, input);
-                    f(&mut lzma_rust2::XzReader::new(buffered, true))
+                    // `u32::MAX` KiB is "no limit" for the library.
+                    let kb = (max_memory / 1024).min(u64::from(u32::MAX) - 1) as u32;
+                    f(&mut lzma_rust2::XzReader::new_mem_limit(buffered, true, kb))
                 }
                 #[cfg(feature = "lz4")]
                 Codec::Lz4 => {

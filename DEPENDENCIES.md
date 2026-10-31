@@ -18,6 +18,7 @@ index when added. `Cargo.lock` is committed and CI builds with `--locked`.
 | lzma-rust2 | 0.23.0 | Apache-2.0 | core (`xz` feature) | XZ streams (LZMA2), multithreaded compression. Pinned to 0.23.0, not the newest 0.24.0, so that it is the same copy `sevenz-rust2` 0.24.2 uses |
 | lz4_flex | 0.14.0 | MIT | core (`lz4` feature) | LZ4 frame format, pure Rust. Its decoder stops after the first frame; `formats/codec.rs` wraps it to read concatenated frames |
 | brotli | 9.1.1 | BSD-3-Clause AND MIT | core (`brotli` feature) | Brotli streams, pure Rust. Its writer swallows errors while closing; `formats/codec.rs` watches for them |
+| sevenz-rust2 | 0.24.2 | Apache-2.0 | core (`sevenz` feature) | 7z reading and writing (LZMA, LZMA2, bzip2, filters). PPMd and Deflate are left out on purpose; the AES feature is added with the encryption step |
 | lexopt | 0.3.2 | MIT | cli | Argument parsing without the size and startup cost of a derive framework |
 | ctrlc | 3.5.2 | MIT/Apache-2.0 | cli | Ctrl-C triggers the cooperative cancel token |
 | tempfile | 3.27.0 | MIT OR Apache-2.0 | tests only | Temporary directories |

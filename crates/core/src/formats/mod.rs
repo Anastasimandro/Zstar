@@ -5,6 +5,8 @@ use std::io::{self, SeekFrom};
 use crate::format::ReadSeek;
 
 pub(crate) mod codec;
+#[cfg(feature = "sevenz")]
+pub(crate) mod sevenz;
 #[cfg(any(
     feature = "gzip",
     feature = "zstd",

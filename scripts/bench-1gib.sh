@@ -51,7 +51,7 @@ print(f"{time.time() - t:.2f} {peak}")' "$@"
 cargo build --release --locked -p zstar-cli --manifest-path "$root/Cargo.toml" >&2
 zstar="$root/target/release/zstar"
 formats=("$@")
-[ ${#formats[@]} -gt 0 ] || formats=(zip tar tar.gz tar.zst tar.bz2 tar.xz tar.lz4 gz zst bz2 xz lz4 br)
+[ ${#formats[@]} -gt 0 ] || formats=(zip 7z tar tar.gz tar.zst tar.bz2 tar.xz tar.lz4 gz zst bz2 xz lz4 br)
 
 printf '| format | compress s | compress MiB | extract s | extract MiB | archive MiB |\n|---|---|---|---|---|---|\n'
 for f in "${formats[@]}"; do

@@ -108,21 +108,23 @@ impl ArchiveFormat for SingleFormat {
         let compressed = stream_len(input)?;
         // The uncompressed size is not reliably stored, so measure it. The extraction size
         // limit applies, which keeps a bomb from tying up a listing.
-        let size = self.codec.with_reader(input, |reader| {
-            let mut buf = vec![0u8; CHUNK];
-            let mut size = 0u64;
-            loop {
-                opts.check_cancel()?;
-                let n = read_chunk(reader, &mut buf)?;
-                if n == 0 {
-                    return Ok(size);
+        let size = self
+            .codec
+            .with_reader(input, opts.limits.max_memory_bytes, |reader| {
+                let mut buf = vec![0u8; CHUNK];
+                let mut size = 0u64;
+                loop {
+                    opts.check_cancel()?;
+                    let n = read_chunk(reader, &mut buf)?;
+                    if n == 0 {
+                        return Ok(size);
+                    }
+                    size += n as u64;
+                    if size > opts.limits.max_total_bytes {
+                        return Err(Error::LimitExceeded(LimitKind::TotalSize));
+                    }
                 }
-                size += n as u64;
-                if size > opts.limits.max_total_bytes {
-                    return Err(Error::LimitExceeded(LimitKind::TotalSize));
-                }
-            }
-        })?;
+            })?;
         visit(EntryInfo {
             name: self.output_name(opts),
             kind: EntryKind::File,
@@ -138,14 +140,15 @@ impl ArchiveFormat for SingleFormat {
     fn extract(&self, input: &mut dyn ReadSeek, dest: &Path, opts: &Options) -> Result<Summary> {
         let input_len = stream_len(input)?;
         let name = self.output_name(opts);
-        self.codec.with_reader(input, |reader| {
-            let session = Session::new(dest, opts, input_len, None, Some(1))?;
-            session.begin_entry()?;
-            let rel = session.rel_path(name.as_bytes())?;
-            let mut buf = vec![0u8; CHUNK];
-            session.write_file(&rel, &name, reader, None, None, &mut buf)?;
-            session.finish()
-        })
+        self.codec
+            .with_reader(input, opts.limits.max_memory_bytes, |reader| {
+                let session = Session::new(dest, opts, input_len, None, Some(1))?;
+                session.begin_entry()?;
+                let rel = session.rel_path(name.as_bytes())?;
+                let mut buf = vec![0u8; CHUNK];
+                session.write_file(&rel, &name, reader, None, None, &mut buf)?;
+                session.finish()
+            })
     }
 
     fn create(

@@ -65,11 +65,12 @@ impl TarFormat {
     fn with_reader<T>(
         &self,
         input: &mut dyn ReadSeek,
+        max_memory: u64,
         f: impl FnOnce(&mut dyn Read) -> Result<T>,
     ) -> Result<T> {
         match self.codec {
             None => f(&mut BufReader::with_capacity(BUF, input)),
-            Some(codec) => codec.with_reader(input, f),
+            Some(codec) => codec.with_reader(input, max_memory, f),
         }
     }
 }
@@ -217,7 +218,7 @@ impl ArchiveFormat for TarFormat {
         opts: &Options,
         visit: &mut dyn FnMut(EntryInfo),
     ) -> Result<()> {
-        self.with_reader(input, |reader| {
+        self.with_reader(input, opts.limits.max_memory_bytes, |reader| {
             let mut archive = tar::Archive::new(reader);
             for entry in archive.entries()? {
                 opts.check_cancel()?;
@@ -229,7 +230,7 @@ impl ArchiveFormat for TarFormat {
 
     fn extract(&self, input: &mut dyn ReadSeek, dest: &Path, opts: &Options) -> Result<Summary> {
         let input_len = stream_len(input)?;
-        self.with_reader(input, |reader| {
+        self.with_reader(input, opts.limits.max_memory_bytes, |reader| {
             let session = Session::new(dest, opts, input_len, None, None)?;
             let mut archive = tar::Archive::new(reader);
             let mut buf = vec![0u8; CHUNK];

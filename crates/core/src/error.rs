@@ -13,6 +13,20 @@ pub enum LimitKind {
     Entries,
     /// Uncompressed size relative to the archive size.
     Ratio,
+    /// Memory a decoder asks for (compression dictionary size).
+    Memory,
+}
+
+impl LimitKind {
+    /// The key of this limit in the `[limits]` table of the configuration file.
+    pub fn config_key(self) -> &'static str {
+        match self {
+            LimitKind::TotalSize => "limits.max_total_bytes",
+            LimitKind::Entries => "limits.max_entries",
+            LimitKind::Ratio => "limits.max_ratio",
+            LimitKind::Memory => "limits.max_memory_bytes",
+        }
+    }
 }
 
 /// Everything that can go wrong in `zstar-core`.
@@ -72,16 +86,17 @@ impl fmt::Display for Error {
                     "unsafe link {name:?} -> {target:?}: points outside the destination"
                 )
             }
-            Error::LimitExceeded(LimitKind::TotalSize) => {
-                write!(f, "extraction limit exceeded: total uncompressed size")
-            }
-            Error::LimitExceeded(LimitKind::Entries) => {
-                write!(f, "extraction limit exceeded: number of entries")
-            }
-            Error::LimitExceeded(LimitKind::Ratio) => {
+            Error::LimitExceeded(kind) => {
+                let what = match kind {
+                    LimitKind::TotalSize => "total uncompressed size",
+                    LimitKind::Entries => "number of entries",
+                    LimitKind::Ratio => "compression ratio (possible decompression bomb)",
+                    LimitKind::Memory => "memory a decoder asks for (compression dictionary size)",
+                };
                 write!(
                     f,
-                    "extraction limit exceeded: compression ratio (possible decompression bomb)"
+                    "extraction limit exceeded: {what} [{}]",
+                    kind.config_key()
                 )
             }
             Error::AlreadyExists(p) => write!(f, "{} already exists", p.display()),
@@ -102,7 +117,12 @@ impl std::error::Error for Error {
 
 impl From<io::Error> for Error {
     fn from(e: io::Error) -> Self {
-        Error::Io(e)
+        // Decoders that check their memory limit up front report it as `OutOfMemory`.
+        if e.kind() == io::ErrorKind::OutOfMemory {
+            Error::LimitExceeded(LimitKind::Memory)
+        } else {
+            Error::Io(e)
+        }
     }
 }
 

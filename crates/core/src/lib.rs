@@ -17,6 +17,7 @@
 #![cfg_attr(
     not(any(
         feature = "zip",
+        feature = "sevenz",
         feature = "tar",
         feature = "gzip",
         feature = "zstd",
@@ -59,7 +60,11 @@ pub fn list(
     opts: &Options,
     visit: &mut dyn FnMut(EntryInfo),
 ) -> Result<Format> {
-    let format = detect_named(input, opts.name_hint.as_deref())?;
+    let format = detect::detect_named_limited(
+        input,
+        opts.name_hint.as_deref(),
+        opts.limits.max_memory_bytes,
+    )?;
     handler(format)?.list(input, opts, visit)?;
     Ok(format)
 }
@@ -68,7 +73,11 @@ pub fn list(
 ///
 /// Brotli has no signature, so it is only recognised through [`Options::name_hint`].
 pub fn extract(input: &mut dyn ReadSeek, dest: &Path, opts: &Options) -> Result<Summary> {
-    let format = detect_named(input, opts.name_hint.as_deref())?;
+    let format = detect::detect_named_limited(
+        input,
+        opts.name_hint.as_deref(),
+        opts.limits.max_memory_bytes,
+    )?;
     handler(format)?.extract(input, dest, opts)
 }
 

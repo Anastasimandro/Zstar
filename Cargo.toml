@@ -24,6 +24,7 @@ bzip2 = "=0.6.1"
 lzma-rust2 = { version = "=0.23.0", default-features = false, features = ["std", "encoder", "optimization", "xz"] }
 lz4_flex = { version = "=0.14.0", default-features = false, features = ["std", "safe-encode", "safe-decode", "frame", "checked-decode"] }
 brotli = { version = "=9.1.1", default-features = false, features = ["std"] }
+sevenz-rust2 = { version = "=0.24.2", default-features = false, features = ["compress", "bzip2"] }
 lexopt = "=0.3.2"
 ctrlc = "=3.5.2"
 tempfile = "=3.27.0"

@@ -13,6 +13,8 @@ use crate::sources::SourceEntry;
 pub enum Format {
     /// ZIP.
     Zip,
+    /// 7z.
+    SevenZ,
     /// Uncompressed tar.
     Tar,
     /// Gzip-compressed tar.
@@ -43,8 +45,9 @@ pub enum Format {
 impl Format {
     /// Every format, whether or not this build supports it. The tar variants come before the
     /// single-file ones so that `a.tar.gz` is matched as tar.gz and not as gz.
-    pub const ALL: [Format; 13] = [
+    pub const ALL: [Format; 14] = [
         Format::Zip,
+        Format::SevenZ,
         Format::Tar,
         Format::TarGz,
         Format::TarZst,
@@ -72,6 +75,7 @@ impl Format {
     pub fn name(self) -> &'static str {
         match self {
             Format::Zip => "zip",
+            Format::SevenZ => "7z",
             Format::Tar => "tar",
             Format::TarGz => "tar.gz",
             Format::TarZst => "tar.zst",
@@ -96,6 +100,7 @@ impl Format {
     pub fn extensions(self) -> &'static [&'static str] {
         match self {
             Format::Zip => &["zip"],
+            Format::SevenZ => &["7z"],
             Format::Tar => &["tar"],
             Format::TarGz => &["tar.gz", "tgz"],
             Format::TarZst => &["tar.zst", "tzst", "tar.zstd"],
@@ -198,6 +203,8 @@ pub fn handler(format: Format) -> Result<&'static dyn ArchiveFormat> {
     match format {
         #[cfg(feature = "zip")]
         Format::Zip => Ok(&crate::formats::zip_format::ZipFormat),
+        #[cfg(feature = "sevenz")]
+        Format::SevenZ => Ok(&crate::formats::sevenz::SevenZFormat),
         #[cfg(feature = "tar")]
         Format::Tar => Ok(&crate::formats::tar_format::TarFormat::PLAIN),
         #[cfg(all(feature = "tar", feature = "gzip"))]
@@ -255,6 +262,7 @@ mod tests {
         assert_eq!(f("a.xz"), Some(Format::Xz));
         assert_eq!(f("a.lz4"), Some(Format::Lz4));
         assert_eq!(f("a.br"), Some(Format::Br));
+        assert_eq!(f("a.7z"), Some(Format::SevenZ));
     }
 
     #[test]

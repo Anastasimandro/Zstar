@@ -55,10 +55,12 @@ formats=("$@")
 
 printf '| format | compress s | compress MiB | extract s | extract MiB | archive MiB |\n|---|---|---|---|---|---|\n'
 for f in "${formats[@]}"; do
-  out="$work/out.$f"; dest="$work/dest"
+  out="$work/out.${f//:/_}.${f%%:*}"; dest="$work/dest"
   rm -rf "$out" "$dest"
   src="$work/in"; case "$f" in gz|zst|bz2|xz|lz4|br) src="$big";; esac
-  c=$(measure "$zstar" compress --format "$f" "$out" "$src")
+  # "zip:zstd" means --format zip --zip-method zstd
+  fmt=${f%%:*}; extra=(); [ "$fmt" != "$f" ] && extra=(--zip-method "${f#*:}")
+  c=$(measure "$zstar" compress --format "$fmt" "${extra[@]}" "$out" "$src")
   x=$(measure "$zstar" extract -o "$dest" "$out")
   set -- $c; cs=$1; cm=$(( $2 / 1024 ))
   set -- $x; xs=$1; xm=$(( $2 / 1024 ))

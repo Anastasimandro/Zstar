@@ -34,7 +34,8 @@ COMMON OPTIONS:
 
 compress:
     -l, --level <N>        compression level (zip/gz: 0-9, zst: 1-22)
-        --format <NAME>    zip, tar, tar.gz or tar.zst (default: from the file name)
+        --format <NAME>    zip, tar, tar.gz, tar.zst, gz or zst (default: from the file name)
+                           gz and zst compress exactly one file
 
 extract:
     -o, --output <DIR>     destination directory (default: current directory)

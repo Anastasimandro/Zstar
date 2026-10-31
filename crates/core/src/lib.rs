@@ -56,14 +56,23 @@ pub fn extract(input: &mut dyn ReadSeek, dest: &Path, opts: &Options) -> Result<
     handler(format)?.extract(input, dest, opts)
 }
 
+/// `opts` with [`Options::name_hint`] set to the file name of `path`, unless already set.
+fn named_after(path: &Path, opts: &Options) -> Options {
+    let mut opts = opts.clone();
+    if opts.name_hint.is_none() {
+        opts.name_hint = path.file_name().and_then(|n| n.to_str()).map(str::to_owned);
+    }
+    opts
+}
+
 /// Lists the archive at `path`.
 pub fn list_file(path: &Path, opts: &Options, visit: &mut dyn FnMut(EntryInfo)) -> Result<Format> {
-    list(&mut File::open(path)?, opts, visit)
+    list(&mut File::open(path)?, &named_after(path, opts), visit)
 }
 
 /// Extracts the archive at `path` into `dest`.
 pub fn extract_file(path: &Path, dest: &Path, opts: &Options) -> Result<Summary> {
-    extract(&mut File::open(path)?, dest, opts)
+    extract(&mut File::open(path)?, dest, &named_after(path, opts))
 }
 
 /// Archives `inputs` into a new file at `output`, written as `<output>.part` and renamed

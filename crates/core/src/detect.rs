@@ -67,8 +67,10 @@ fn tar_inside(decoder: &mut dyn Read) -> Result<bool> {
 
 /// Identifies the archive format of `input` and rewinds it to the start.
 ///
-/// Gzip and Zstandard streams are only reported as tar archives when their first
-/// decompressed block is a valid tar header; plain `.gz`/`.zst` files are not archives.
+/// Gzip and Zstandard streams are reported as tar archives when their first decompressed
+/// block is a valid tar header, and as single compressed files (gz, zst) otherwise. Only the
+/// magic bytes and that first block are checked, so a corrupt stream is still detected here
+/// and fails later, when it is read.
 pub fn detect(input: &mut dyn ReadSeek) -> Result<Format> {
     input.seek(SeekFrom::Start(0))?;
     let mut head = [0u8; TAR_BLOCK];
@@ -86,16 +88,10 @@ pub fn detect(input: &mut dyn ReadSeek) -> Result<Format> {
             let is_tar = tar_inside(&mut dec)?;
             drop(dec);
             input.seek(SeekFrom::Start(0))?;
-            return if is_tar {
-                Ok(Format::TarGz)
-            } else {
-                Err(Error::UnsupportedFormat(
-                    "gzip file that does not contain a tar archive".into(),
-                ))
-            };
+            return Ok(if is_tar { Format::TarGz } else { Format::Gz });
         }
         #[cfg(not(feature = "gzip"))]
-        return Err(Error::FeatureDisabled(Format::TarGz));
+        return Err(Error::FeatureDisabled(Format::Gz));
     }
     if head.starts_with(ZSTD_MAGIC) {
         #[cfg(feature = "zstd")]
@@ -105,16 +101,10 @@ pub fn detect(input: &mut dyn ReadSeek) -> Result<Format> {
                 Err(_) => false,
             };
             input.seek(SeekFrom::Start(0))?;
-            return if is_tar {
-                Ok(Format::TarZst)
-            } else {
-                Err(Error::UnsupportedFormat(
-                    "zstd file that does not contain a tar archive".into(),
-                ))
-            };
+            return Ok(if is_tar { Format::TarZst } else { Format::Zst });
         }
         #[cfg(not(feature = "zstd"))]
-        return Err(Error::FeatureDisabled(Format::TarZst));
+        return Err(Error::FeatureDisabled(Format::Zst));
     }
     if is_tar_header(head) {
         return Ok(Format::Tar);
@@ -193,10 +183,7 @@ mod tests {
             Cursor::new(e.finish().unwrap())
         };
         assert_eq!(detect(&mut gz(&tar_header("x"))).unwrap(), Format::TarGz);
-        assert!(matches!(
-            detect(&mut gz(b"plain text")),
-            Err(Error::UnsupportedFormat(_))
-        ));
+        assert_eq!(detect(&mut gz(b"plain text")).unwrap(), Format::Gz);
     }
 
     #[cfg(feature = "zstd")]
@@ -204,9 +191,6 @@ mod tests {
     fn zstd_is_tar_zst_only_when_it_holds_a_tar() {
         let z = |data: &[u8]| Cursor::new(zstd::encode_all(data, 1).unwrap());
         assert_eq!(detect(&mut z(&tar_header("x"))).unwrap(), Format::TarZst);
-        assert!(matches!(
-            detect(&mut z(b"plain text")),
-            Err(Error::UnsupportedFormat(_))
-        ));
+        assert_eq!(detect(&mut z(b"plain text")).unwrap(), Format::Zst);
     }
 }

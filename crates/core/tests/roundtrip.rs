@@ -107,8 +107,11 @@ fn round_trip_every_format_multi_threaded() {
 }
 
 #[test]
-fn at_least_the_four_first_formats_are_built_in() {
-    assert_eq!(all_formats(), Format::ALL.to_vec());
+fn all_container_and_single_formats_are_built_in() {
+    let (single, containers): (Vec<_>, Vec<_>) =
+        Format::ALL.into_iter().partition(|f| f.is_single_file());
+    assert_eq!(all_formats(), containers);
+    assert_eq!(single_formats(), single);
 }
 
 #[test]

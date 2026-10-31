@@ -19,11 +19,29 @@ pub enum Format {
     TarGz,
     /// Zstandard-compressed tar.
     TarZst,
+    /// A single file compressed with gzip.
+    Gz,
+    /// A single file compressed with Zstandard.
+    Zst,
 }
 
 impl Format {
-    /// Every format, whether or not this build supports it.
-    pub const ALL: [Format; 4] = [Format::Zip, Format::Tar, Format::TarGz, Format::TarZst];
+    /// Every format, whether or not this build supports it. The tar variants come before the
+    /// single-file ones so that `a.tar.gz` is matched as tar.gz and not as gz.
+    pub const ALL: [Format; 6] = [
+        Format::Zip,
+        Format::Tar,
+        Format::TarGz,
+        Format::TarZst,
+        Format::Gz,
+        Format::Zst,
+    ];
+
+    /// True for formats that compress one file with no container around it. They accept
+    /// exactly one regular file and cannot hold directories.
+    pub fn is_single_file(self) -> bool {
+        matches!(self, Format::Gz | Format::Zst)
+    }
 
     /// Short human-readable name, also accepted by [`Format::from_name`].
     pub fn name(self) -> &'static str {
@@ -32,6 +50,8 @@ impl Format {
             Format::Tar => "tar",
             Format::TarGz => "tar.gz",
             Format::TarZst => "tar.zst",
+            Format::Gz => "gz",
+            Format::Zst => "zst",
         }
     }
 
@@ -47,6 +67,8 @@ impl Format {
             Format::Tar => &["tar"],
             Format::TarGz => &["tar.gz", "tgz"],
             Format::TarZst => &["tar.zst", "tzst", "tar.zstd"],
+            Format::Gz => &["gz"],
+            Format::Zst => &["zst", "zstd"],
         }
     }
 
@@ -143,6 +165,10 @@ pub fn handler(format: Format) -> Result<&'static dyn ArchiveFormat> {
         Format::TarGz => Ok(&crate::formats::tar_format::TarFormat::GZIP),
         #[cfg(all(feature = "tar", feature = "zstd"))]
         Format::TarZst => Ok(&crate::formats::tar_format::TarFormat::ZSTD),
+        #[cfg(feature = "gzip")]
+        Format::Gz => Ok(&crate::formats::single::SingleFormat::GZ),
+        #[cfg(feature = "zstd")]
+        Format::Zst => Ok(&crate::formats::single::SingleFormat::ZST),
         #[allow(unreachable_patterns)]
         other => Err(Error::FeatureDisabled(other)),
     }
@@ -164,7 +190,10 @@ mod tests {
         assert_eq!(f("a.txt"), None);
         assert_eq!(f("zip"), None);
         assert_eq!(f(".zip"), None);
-        assert_eq!(f("a.gz"), None);
+        assert_eq!(f("a.gz"), Some(Format::Gz));
+        assert_eq!(f("a.txt.ZST"), Some(Format::Zst));
+        assert_eq!(f("a.tar.gz"), Some(Format::TarGz), "tar.gz wins over gz");
+        assert_eq!(f(".gz"), None);
     }
 
     #[test]

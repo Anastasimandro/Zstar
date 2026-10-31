@@ -1,4 +1,4 @@
-//! tar, optionally wrapped in a streaming compressor (gzip, zstd).
+//! tar, optionally wrapped in a streaming compressor (see [`Codec`]).
 //!
 //! Everything is streamed through fixed buffers: memory use does not depend on archive or
 //! entry size. tar itself is sequential, so only zstd compression uses extra threads.
@@ -13,6 +13,7 @@ use tar::{EntryType, Header};
 use crate::error::{Error, Result};
 use crate::extract::{CHUNK, Session, Summary};
 use crate::format::{ArchiveFormat, EntryInfo, EntryKind, Format, ReadSeek, WriteSeek};
+use crate::formats::codec::Codec;
 use crate::formats::stream_len;
 use crate::options::Options;
 use crate::progress::Tracker;
@@ -22,33 +23,25 @@ const BUF: usize = 64 * 1024;
 /// Longest hard-link or symlink target we accept.
 const MAX_LINK_TARGET: usize = 4096;
 
-#[derive(Clone, Copy)]
-enum Codec {
-    None,
-    #[cfg(feature = "gzip")]
-    Gzip,
-    #[cfg(feature = "zstd")]
-    Zstd,
-}
-
 pub(crate) struct TarFormat {
-    codec: Codec,
+    /// `None` is plain, uncompressed tar.
+    codec: Option<Codec>,
     format: Format,
 }
 
 impl TarFormat {
     pub(crate) const PLAIN: TarFormat = TarFormat {
-        codec: Codec::None,
+        codec: None,
         format: Format::Tar,
     };
     #[cfg(feature = "gzip")]
     pub(crate) const GZIP: TarFormat = TarFormat {
-        codec: Codec::Gzip,
+        codec: Some(Codec::Gzip),
         format: Format::TarGz,
     };
     #[cfg(feature = "zstd")]
     pub(crate) const ZSTD: TarFormat = TarFormat {
-        codec: Codec::Zstd,
+        codec: Some(Codec::Zstd),
         format: Format::TarZst,
     };
 
@@ -59,43 +52,8 @@ impl TarFormat {
         f: impl FnOnce(&mut dyn Read) -> Result<T>,
     ) -> Result<T> {
         match self.codec {
-            Codec::None => f(&mut BufReader::with_capacity(BUF, input)),
-            #[cfg(feature = "gzip")]
-            Codec::Gzip => {
-                let buffered = BufReader::with_capacity(BUF, input);
-                f(&mut flate2::bufread::MultiGzDecoder::new(buffered))
-            }
-            #[cfg(feature = "zstd")]
-            Codec::Zstd => f(&mut zstd::stream::read::Decoder::new(input)?),
-        }
-    }
-
-    /// Validates `opts.level` for this codec and returns it, or the codec's default.
-    fn level(&self, opts: &Options) -> Result<i32> {
-        let bounds: Option<(i32, std::ops::RangeInclusive<i32>)> = match self.codec {
-            Codec::None => None,
-            #[cfg(feature = "gzip")]
-            Codec::Gzip => Some((6, 0..=9)),
-            #[cfg(feature = "zstd")]
-            Codec::Zstd => Some((3, 1..=22)),
-        };
-        let Some((default, range)) = bounds else {
-            return match opts.level {
-                None => Ok(0),
-                Some(_) => Err(Error::InvalidOption(
-                    "plain tar has no compression level".into(),
-                )),
-            };
-        };
-        match opts.level {
-            None => Ok(default),
-            Some(l) if range.contains(&l) => Ok(l),
-            Some(l) => Err(Error::InvalidOption(format!(
-                "{} compression level must be {}-{}, got {l}",
-                self.format.name(),
-                range.start(),
-                range.end()
-            ))),
+            None => f(&mut BufReader::with_capacity(BUF, input)),
+            Some(codec) => codec.with_reader(input, f),
         }
     }
 }
@@ -311,28 +269,17 @@ impl ArchiveFormat for TarFormat {
         out: &mut dyn WriteSeek,
         opts: &Options,
     ) -> Result<()> {
-        #[cfg_attr(not(any(feature = "gzip", feature = "zstd")), allow(unused_variables))]
-        let level = self.level(opts)?;
         let result = match self.codec {
-            Codec::None => write_tar(out, sources, opts).map(drop),
-            #[cfg(feature = "gzip")]
-            Codec::Gzip => {
-                let encoder =
-                    flate2::write::GzEncoder::new(out, flate2::Compression::new(level as u32));
-                write_tar(encoder, sources, opts).and_then(|e| Ok(e.finish().map(drop)?))
+            None if opts.level.is_some() => Err(Error::InvalidOption(
+                "plain tar has no compression level".into(),
+            )),
+            None => write_tar(out, sources, opts).map(drop),
+            Some(codec) => {
+                let level = codec.level(opts.level)?;
+                codec.with_writer(out, level, opts.effective_threads(), |w| {
+                    write_tar(w, sources, opts).map(drop)
+                })
             }
-            #[cfg(feature = "zstd")]
-            Codec::Zstd => (|| {
-                let mut encoder = zstd::stream::write::Encoder::new(out, level)?;
-                encoder.include_checksum(true)?;
-                let threads = opts.effective_threads();
-                if threads > 1 {
-                    encoder.multithread(threads as u32)?;
-                }
-                let encoder = write_tar(encoder, sources, opts)?;
-                encoder.finish()?;
-                Ok(())
-            })(),
         };
         // A cancelled read surfaces as an I/O error from deep inside the tar builder.
         result.map_err(|e| {

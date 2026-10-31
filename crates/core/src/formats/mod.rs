@@ -4,6 +4,10 @@ use std::io::{self, SeekFrom};
 
 use crate::format::ReadSeek;
 
+#[cfg(any(feature = "tar", feature = "gzip", feature = "zstd"))]
+pub(crate) mod codec;
+#[cfg(any(feature = "gzip", feature = "zstd"))]
+pub(crate) mod single;
 #[cfg(feature = "tar")]
 pub(crate) mod tar_format;
 #[cfg(feature = "zip")]

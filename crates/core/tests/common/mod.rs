@@ -9,10 +9,19 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use zstar_core::{Format, handler};
 
+/// Formats that hold a directory tree. Single-file formats have their own tests.
 pub fn all_formats() -> Vec<Format> {
     Format::ALL
         .into_iter()
-        .filter(|&f| handler(f).is_ok())
+        .filter(|&f| !f.is_single_file() && handler(f).is_ok())
+        .collect()
+}
+
+/// Single-file formats built into this test run.
+pub fn single_formats() -> Vec<Format> {
+    Format::ALL
+        .into_iter()
+        .filter(|&f| f.is_single_file() && handler(f).is_ok())
         .collect()
 }
 

@@ -97,6 +97,10 @@ pub struct Options {
     pub cancel: CancelToken,
     /// Optional progress callback.
     pub progress: Option<ProgressFn>,
+    /// File name of the archive being read. A single-file format (gz, zst) has no name of its
+    /// own, so it extracts to this name minus the extension. The `*_file` functions fill it in;
+    /// callers of the stream API may set it, otherwise the output is called `data`.
+    pub name_hint: Option<String>,
 }
 
 impl Default for Options {
@@ -109,6 +113,7 @@ impl Default for Options {
             windows_names: cfg!(windows),
             cancel: CancelToken::new(),
             progress: None,
+            name_hint: None,
         }
     }
 }

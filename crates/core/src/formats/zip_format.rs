@@ -18,7 +18,7 @@ use crate::error::{Error, LimitKind, Result};
 use crate::extract::{CHUNK, Session, Summary};
 use crate::format::{ArchiveFormat, EntryInfo, EntryKind, Format, ReadSeek, WriteSeek};
 use crate::formats::stream_len;
-use crate::options::Options;
+use crate::options::{Options, ZipMethod};
 use crate::progress::Tracker;
 use crate::sources::SourceEntry;
 use crate::timeconv::{Civil, civil_to_system, system_to_civil};
@@ -275,24 +275,70 @@ fn run_workers(
     }
 }
 
-fn zip_level(opts: &Options) -> Result<Option<i64>> {
-    match opts.level {
-        None => Ok(None),
-        Some(l @ 0..=9) => Ok(Some(i64::from(l))),
-        Some(l) => Err(Error::InvalidOption(format!(
-            "zip compression level must be 0-9, got {l}"
-        ))),
-    }
+/// How entries are compressed: validated once, then copied to every worker.
+#[derive(Clone, Copy)]
+struct Compression {
+    method: CompressionMethod,
+    level: Option<i64>,
 }
 
-fn file_options(s: &SourceEntry, level: Option<i64>) -> SimpleFileOptions {
+fn compression(opts: &Options) -> Result<Compression> {
+    let method = opts.zip_method.unwrap_or(ZipMethod::Deflate);
+    let range = |lo: i32, hi: i32| match opts.level {
+        None => Ok(None),
+        Some(l) if (lo..=hi).contains(&l) => Ok(Some(i64::from(l))),
+        Some(l) => Err(Error::InvalidOption(format!(
+            "zip {} compression level must be {lo}-{hi}, got {l}",
+            method.name()
+        ))),
+    };
+    Ok(match method {
+        ZipMethod::Stored => {
+            if opts.level.is_some() {
+                return Err(Error::InvalidOption(
+                    "stored zip entries have no compression level".into(),
+                ));
+            }
+            Compression {
+                method: CompressionMethod::Stored,
+                level: None,
+            }
+        }
+        // Level 0 has always meant "store" for zip.
+        ZipMethod::Deflate => match range(0, 9)? {
+            Some(0) => Compression {
+                method: CompressionMethod::Stored,
+                level: None,
+            },
+            level => Compression {
+                method: CompressionMethod::Deflated,
+                level,
+            },
+        },
+        #[cfg(feature = "zip-bzip2")]
+        ZipMethod::Bzip2 => Compression {
+            method: CompressionMethod::Bzip2,
+            level: range(1, 9)?,
+        },
+        #[cfg(feature = "zip-zstd")]
+        ZipMethod::Zstd => Compression {
+            method: CompressionMethod::Zstd,
+            level: range(1, 22)?,
+        },
+        #[allow(unreachable_patterns)]
+        other => {
+            return Err(Error::InvalidOption(format!(
+                "zip method {} is not enabled in this build",
+                other.name()
+            )));
+        }
+    })
+}
+
+fn file_options(s: &SourceEntry, plan: Compression) -> SimpleFileOptions {
     let mut o = SimpleFileOptions::default()
-        .compression_method(if level == Some(0) {
-            CompressionMethod::Stored
-        } else {
-            CompressionMethod::Deflated
-        })
-        .compression_level(level.filter(|&l| l > 0))
+        .compression_method(plan.method)
+        .compression_level(plan.level)
         .large_file(s.size >= u64::from(u32::MAX));
     if let Some(mode) = s.mode {
         o = o.unix_permissions(mode);
@@ -305,7 +351,7 @@ fn file_options(s: &SourceEntry, level: Option<i64>) -> SimpleFileOptions {
 
 fn compress_small(
     s: &SourceEntry,
-    level: Option<i64>,
+    plan: Compression,
     opts: &Options,
     tracker: &Tracker<'_>,
 ) -> Result<PreparedZipFile> {
@@ -319,7 +365,7 @@ fn compress_small(
             io::Error::other(format!("{} grew while being archived", s.path.display())).into(),
         );
     }
-    let mut builder = ZipFileBuilder::new(&s.name, file_options(s, level))?;
+    let mut builder = ZipFileBuilder::new(&s.name, file_options(s, plan))?;
     builder.write_all(&data)?;
     tracker.add_bytes(data.len() as u64, &s.name);
     Ok(builder.finish()?)
@@ -328,14 +374,14 @@ fn compress_small(
 struct Creator<'a, 'o> {
     zw: ZipWriter<BufWriter<&'a mut dyn WriteSeek>>,
     opts: &'o Options,
-    level: Option<i64>,
+    plan: Compression,
     tracker: Tracker<'o>,
     buf: Vec<u8>,
 }
 
 impl Creator<'_, '_> {
     fn add_streamed(&mut self, s: &SourceEntry) -> Result<()> {
-        self.zw.start_file(&s.name, file_options(s, self.level))?;
+        self.zw.start_file(&s.name, file_options(s, self.plan))?;
         let mut file = File::open(&s.path)?;
         loop {
             self.opts.check_cancel()?;
@@ -352,7 +398,7 @@ impl Creator<'_, '_> {
     }
 
     fn add_other(&mut self, s: &SourceEntry) -> Result<()> {
-        let options = file_options(s, self.level);
+        let options = file_options(s, self.plan);
         match s.kind {
             EntryKind::Dir => self.zw.add_directory(&s.name, options)?,
             EntryKind::Symlink => {
@@ -369,14 +415,14 @@ impl Creator<'_, '_> {
         let slots: Vec<Mutex<Option<Result<PreparedZipFile>>>> =
             batch.iter().map(|_| Mutex::new(None)).collect();
         let next = AtomicUsize::new(0);
-        let (opts, level, tracker) = (self.opts, self.level, &self.tracker);
+        let (opts, plan, tracker) = (self.opts, self.plan, &self.tracker);
         std::thread::scope(|scope| {
             for _ in 0..threads.min(batch.len()) {
                 scope.spawn(|| {
                     loop {
                         let i = next.fetch_add(1, Ordering::Relaxed);
                         let Some(&s) = batch.get(i) else { break };
-                        let done = compress_small(s, level, opts, tracker);
+                        let done = compress_small(s, plan, opts, tracker);
                         *slots[i].lock().unwrap_or_else(PoisonError::into_inner) = Some(done);
                     }
                 });
@@ -462,12 +508,12 @@ impl ArchiveFormat for ZipFormat {
         out: &mut dyn WriteSeek,
         opts: &Options,
     ) -> Result<()> {
-        let level = zip_level(opts)?;
+        let plan = compression(opts)?;
         let total = sources.iter().map(|s| s.size).sum();
         let mut c = Creator {
             zw: ZipWriter::new(BufWriter::with_capacity(BUF, out)),
             opts,
-            level,
+            plan,
             tracker: Tracker::new(opts, Some(total), Some(sources.len() as u64)),
             buf: vec![0u8; CHUNK],
         };

@@ -35,7 +35,7 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Each format feature builds on its own
         run: |
-          for f in zip tar gzip zstd bzip2 xz lz4 brotli sevenz tar,gzip tar,zstd tar,bzip2 tar,xz tar,lz4; do
+          for f in zip tar gzip zstd bzip2 xz lz4 brotli sevenz zip-bzip2 zip-lzma zip-zstd zip-deflate64 tar,gzip tar,zstd tar,bzip2 tar,xz tar,lz4; do
             cargo clippy -p zstar-core --lib --locked --no-default-features --features "$f" -- -D warnings
           done
 

@@ -85,6 +85,46 @@ impl Default for Limits {
     }
 }
 
+/// How the entries of a new zip archive are compressed.
+///
+/// LZMA and Deflate64 are not listed: the zip library reads them but cannot write them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ZipMethod {
+    /// No compression.
+    Stored,
+    /// Deflate: what every zip tool reads. The default.
+    Deflate,
+    /// Bzip2 (needs the `zip-bzip2` feature).
+    Bzip2,
+    /// Zstandard (needs the `zip-zstd` feature; older unzip tools cannot read it).
+    Zstd,
+}
+
+impl ZipMethod {
+    /// Name as used on the command line.
+    pub fn name(self) -> &'static str {
+        match self {
+            ZipMethod::Stored => "store",
+            ZipMethod::Deflate => "deflate",
+            ZipMethod::Bzip2 => "bzip2",
+            ZipMethod::Zstd => "zstd",
+        }
+    }
+
+    /// Parses a name as returned by [`ZipMethod::name`].
+    pub fn from_name(name: &str) -> Option<ZipMethod> {
+        [
+            ZipMethod::Stored,
+            ZipMethod::Deflate,
+            ZipMethod::Bzip2,
+            ZipMethod::Zstd,
+        ]
+        .into_iter()
+        .find(|m| m.name() == name)
+    }
+}
+
 /// Settings shared by list, extract and create.
 #[derive(Clone)]
 pub struct Options {
@@ -94,6 +134,8 @@ pub struct Options {
     pub threads: usize,
     /// Compression level; the valid range depends on the format. `None` uses its default.
     pub level: Option<i32>,
+    /// Compression method for zip entries. `None` is deflate.
+    pub zip_method: Option<ZipMethod>,
     /// Replace existing files instead of failing.
     pub overwrite: bool,
     /// Reject names that Windows cannot create (reserved device names, `:` and so on).
@@ -115,6 +157,7 @@ impl Default for Options {
             limits: Limits::default(),
             threads: 0,
             level: None,
+            zip_method: None,
             overwrite: false,
             windows_names: cfg!(windows),
             cancel: CancelToken::new(),

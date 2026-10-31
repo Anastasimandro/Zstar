@@ -8,8 +8,13 @@ license.workspace = true
 authors.workspace = true
 
 [features]
-default = ["zip", "tar", "gzip", "zstd", "bzip2", "xz", "lz4", "brotli", "sevenz"]
+default = ["zip", "tar", "gzip", "zstd", "bzip2", "xz", "lz4", "brotli", "sevenz", "zip-bzip2", "zip-lzma", "zip-zstd", "zip-deflate64"]
 zip = ["dep:zip"]
+# Extra zip methods. Deflate64 and LZMA can only be read: the zip crate cannot write them.
+zip-bzip2 = ["zip", "zip/bzip2"]
+zip-lzma = ["zip", "zip/lzma"]
+zip-zstd = ["zip", "zip/zstd"]
+zip-deflate64 = ["zip", "zip/deflate64"]
 tar = ["dep:tar"]
 gzip = ["dep:flate2"]
 zstd = ["dep:zstd"]

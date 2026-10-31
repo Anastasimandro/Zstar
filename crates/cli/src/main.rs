@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use lexopt::prelude::*;
-use zstar_core::{EntryKind, Error, Format, LimitKind, Options};
+use zstar_core::{EntryKind, Error, Format, LimitKind, Options, ZipMethod};
 
 /// Release builds set `ZSTAR_VERSION` (see `.github/workflows/release.yml`) so the binary
 /// reports the version of the release it was published in.
@@ -39,6 +39,9 @@ compress:
         --format <NAME>    zip, 7z, tar, tar.gz, tar.bz2, tar.xz, tar.zst, tar.lz4, or one of
                            gz, bz2, xz, zst, lz4, br (default: from the file name).
                            The single-file formats compress exactly one file.
+        --zip-method <M>   zip entries: deflate (default), store, bzip2 or zstd (older
+                           unzip tools cannot read zstd). Zip also extracts LZMA and
+                           Deflate64, which Zstar cannot write.
 
 extract:
     -o, --output <DIR>     destination directory (default: current directory)
@@ -143,6 +146,12 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Cli>, String
             Short('f') | Long("force") => opts.overwrite = true,
             Short('l') | Long("level") => {
                 opts.level = Some(p.value().map_err(e)?.parse().map_err(e)?)
+            }
+            Long("zip-method") => {
+                let v: String = p.value().map_err(e)?.parse().map_err(e)?;
+                opts.zip_method = Some(ZipMethod::from_name(&v).ok_or(format!(
+                    "unknown zip method '{v}' (deflate, store, bzip2, zstd)"
+                ))?);
             }
             Long("format") => {
                 let v: String = p.value().map_err(e)?.parse().map_err(e)?;

@@ -10,7 +10,7 @@ index when added. `Cargo.lock` is committed and CI builds with `--locked`.
 
 | Crate | Version | Licence | Used by | Why |
 |-------|---------|---------|---------|-----|
-| zip | 9.1.3 | MIT | core (`zip` feature) | ZIP reading and writing; decodes CP437 names; parallel-friendly metadata |
+| zip | 9.1.3 | MIT | core (`zip` feature) | ZIP reading and writing; decodes CP437 names; parallel-friendly metadata. Method features: `zip-bzip2`, `zip-zstd` (read and write), `zip-lzma`, `zip-deflate64` (read only: the library cannot write them). 9.2.0 exists; not adopted yet |
 | tar | 0.4.46 | MIT OR Apache-2.0 | core (`tar` feature) | tar header parsing and writing, GNU and pax long names |
 | flate2 | 1.1.10 | MIT OR Apache-2.0 | core (`gzip` feature) | gzip streams; built with the pure-Rust `zlib-rs` backend |
 | zstd | 0.14.3 | BSD-3-Clause | core (`zstd` feature) | Zstandard streams, multithreaded compression (`zstdmt`) |
@@ -31,6 +31,7 @@ index when added. `Cargo.lock` is committed and CI builds with `--locked`.
 | brotli-decompressor, alloc-stdlib, alloc-no-stdlib | BSD-3-Clause AND MIT / BSD-3-Clause | brotli | Decoder and allocators |
 | twox-hash | MIT | lz4_flex | xxHash32 for the frame checksums |
 | sha2 | MIT OR Apache-2.0 | lzma-rust2 | XZ SHA-256 integrity check type |
+| deflate64 | MIT | zip (`zip-deflate64`) | Deflate64 decoder; there is no compressor, so Zstar cannot write Deflate64 |
 | zlib-rs | Zlib | flate2 | Pure-Rust zlib; also what zip's deflate uses |
 | zstd-sys | BSD-3-Clause | zstd | Bundles the reference C implementation of Zstandard (BSD-licensed); needs a C compiler at build time |
 | zstd-safe | BSD-3-Clause | zstd | Safe wrapper over zstd-sys |

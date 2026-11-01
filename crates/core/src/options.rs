@@ -125,6 +125,29 @@ impl ZipMethod {
     }
 }
 
+/// A password for encrypted archives. It never appears in `Debug` output or error messages.
+#[cfg_attr(not(any(feature = "zip", feature = "sevenz")), allow(dead_code))]
+#[derive(Clone)]
+pub struct Password(Arc<str>);
+
+impl Password {
+    /// Wraps `password`. An empty password is rejected by the formats that use it.
+    pub fn new(password: &str) -> Self {
+        Password(password.into())
+    }
+
+    #[cfg_attr(not(any(feature = "zip", feature = "sevenz")), allow(dead_code))]
+    pub(crate) fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for Password {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Password(<redacted>)")
+    }
+}
+
 /// Settings shared by list, extract and create.
 #[derive(Clone)]
 pub struct Options {
@@ -149,6 +172,9 @@ pub struct Options {
     /// own, so it extracts to this name minus the extension. The `*_file` functions fill it in;
     /// callers of the stream API may set it, otherwise the output is called `data`.
     pub name_hint: Option<String>,
+    /// Password to decrypt with (extract, list) or to encrypt with (create). Only zip
+    /// (WinZip AES-256) and 7z (AES-256) support it; other formats reject it.
+    pub password: Option<Password>,
 }
 
 impl Default for Options {
@@ -163,6 +189,7 @@ impl Default for Options {
             cancel: CancelToken::new(),
             progress: None,
             name_hint: None,
+            password: None,
         }
     }
 }
@@ -174,6 +201,18 @@ impl Options {
             self.threads
         } else {
             std::thread::available_parallelism().map_or(1, |n| n.get())
+        }
+    }
+
+    /// The password, or an error if it is empty.
+    #[cfg_attr(not(any(feature = "zip", feature = "sevenz")), allow(dead_code))]
+    pub(crate) fn secret(&self) -> Result<Option<&str>> {
+        match &self.password {
+            None => Ok(None),
+            Some(p) if p.expose().is_empty() => {
+                Err(Error::InvalidOption("the password is empty".into()))
+            }
+            Some(p) => Ok(Some(p.expose())),
         }
     }
 

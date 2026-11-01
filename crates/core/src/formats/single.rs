@@ -105,6 +105,7 @@ impl ArchiveFormat for SingleFormat {
         opts: &Options,
         visit: &mut dyn FnMut(EntryInfo),
     ) -> Result<()> {
+        super::no_password(opts, self.format)?;
         let compressed = stream_len(input)?;
         // The uncompressed size is not reliably stored, so measure it. The extraction size
         // limit applies, which keeps a bomb from tying up a listing.
@@ -138,6 +139,7 @@ impl ArchiveFormat for SingleFormat {
     }
 
     fn extract(&self, input: &mut dyn ReadSeek, dest: &Path, opts: &Options) -> Result<Summary> {
+        super::no_password(opts, self.format)?;
         let input_len = stream_len(input)?;
         let name = self.output_name(opts);
         self.codec
@@ -157,6 +159,7 @@ impl ArchiveFormat for SingleFormat {
         out: &mut dyn WriteSeek,
         opts: &Options,
     ) -> Result<()> {
+        super::no_password(opts, self.format)?;
         let level = self.codec.level(opts.level)?;
         only_one_file(sources, self.format.name())?;
         let src = &sources[0];

@@ -61,6 +61,10 @@ pub enum Error {
     AlreadyExists(PathBuf),
     /// A caller-supplied option is invalid for this operation.
     InvalidOption(String),
+    /// The archive is encrypted and no password was given.
+    PasswordRequired,
+    /// The password does not decrypt the archive.
+    WrongPassword,
     /// The operation was cancelled through its [`CancelToken`](crate::CancelToken).
     Cancelled,
 }
@@ -101,6 +105,10 @@ impl fmt::Display for Error {
             }
             Error::AlreadyExists(p) => write!(f, "{} already exists", p.display()),
             Error::InvalidOption(msg) => write!(f, "invalid option: {msg}"),
+            Error::PasswordRequired => {
+                write!(f, "the archive is encrypted: a password is required")
+            }
+            Error::WrongPassword => write!(f, "wrong password"),
             Error::Cancelled => write!(f, "cancelled"),
         }
     }
@@ -131,6 +139,12 @@ impl From<zip::result::ZipError> for Error {
     fn from(e: zip::result::ZipError) -> Self {
         match e {
             zip::result::ZipError::Io(e) => Error::Io(e),
+            zip::result::ZipError::InvalidPassword => Error::WrongPassword,
+            zip::result::ZipError::UnsupportedArchive(m)
+                if m == zip::result::ZipError::PASSWORD_REQUIRED =>
+            {
+                Error::PasswordRequired
+            }
             other => Error::InvalidArchive(other.to_string()),
         }
     }

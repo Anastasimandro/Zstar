@@ -218,6 +218,7 @@ impl ArchiveFormat for TarFormat {
         opts: &Options,
         visit: &mut dyn FnMut(EntryInfo),
     ) -> Result<()> {
+        super::no_password(opts, self.format)?;
         self.with_reader(input, opts.limits.max_memory_bytes, |reader| {
             let mut archive = tar::Archive::new(reader);
             for entry in archive.entries()? {
@@ -229,6 +230,7 @@ impl ArchiveFormat for TarFormat {
     }
 
     fn extract(&self, input: &mut dyn ReadSeek, dest: &Path, opts: &Options) -> Result<Summary> {
+        super::no_password(opts, self.format)?;
         let input_len = stream_len(input)?;
         self.with_reader(input, opts.limits.max_memory_bytes, |reader| {
             let session = Session::new(dest, opts, input_len, None, None)?;
@@ -286,6 +288,7 @@ impl ArchiveFormat for TarFormat {
         out: &mut dyn WriteSeek,
         opts: &Options,
     ) -> Result<()> {
+        super::no_password(opts, self.format)?;
         let result = match self.codec {
             None if opts.level.is_some() => Err(Error::InvalidOption(
                 "plain tar has no compression level".into(),

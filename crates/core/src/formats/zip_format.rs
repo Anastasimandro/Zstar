@@ -11,7 +11,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, PoisonError};
 use std::time::SystemTime;
 
-use zip::write::{PreparedZipFile, SimpleFileOptions, ZipFileBuilder};
+use zip::read::ZipFile;
+use zip::result::ZipResult;
+use zip::write::{FileOptions, PreparedZipFile, SimpleFileOptions, ZipFileBuilder};
 use zip::{CompressionMethod, DateTime, ZipArchive, ZipWriter};
 
 use crate::error::{Error, LimitKind, Result};
@@ -218,11 +220,24 @@ impl Plan {
     }
 }
 
+/// Opens an entry, decrypting it when a secret is given (it is ignored for plain entries).
+fn entry<'a, R: Read + Seek>(
+    archive: &'a mut ZipArchive<R>,
+    index: usize,
+    secret: Option<&str>,
+) -> ZipResult<ZipFile<'a, R>> {
+    match secret {
+        Some(p) => archive.by_index_decrypt(index, p.as_bytes()),
+        None => archive.by_index(index),
+    }
+}
+
 fn worker(
     shared: &Mutex<&mut dyn ReadSeek>,
     files: &[FileItem],
     session: &Session<'_>,
     next: &AtomicUsize,
+    secret: Option<&str>,
 ) -> Result<()> {
     let mut archive = open(shared)?;
     let mut buf = vec![0u8; CHUNK];
@@ -231,7 +246,7 @@ fn worker(
         let Some(item) = files.get(next.fetch_add(1, Ordering::Relaxed)) else {
             return Ok(());
         };
-        let mut file = archive.by_index(item.index)?;
+        let mut file = entry(&mut archive, item.index, secret)?;
         session.write_file(
             &item.rel, &item.name, &mut file, item.mode, item.mtime, &mut buf,
         )?;
@@ -243,11 +258,12 @@ fn run_workers(
     files: &[FileItem],
     session: &Session<'_>,
     threads: usize,
+    secret: Option<&str>,
 ) -> Result<()> {
     let next = AtomicUsize::new(0);
     let first_error: Mutex<Option<Error>> = Mutex::new(None);
     let work = || {
-        if let Err(e) = worker(shared, files, session, &next) {
+        if let Err(e) = worker(shared, files, session, &next, secret) {
             // Record the cause before aborting, so the others' "cancelled" never wins.
             first_error
                 .lock()
@@ -335,11 +351,21 @@ fn compression(opts: &Options) -> Result<Compression> {
     })
 }
 
-fn file_options(s: &SourceEntry, plan: Compression) -> SimpleFileOptions {
-    let mut o = SimpleFileOptions::default()
+fn file_options<'k>(
+    s: &SourceEntry,
+    plan: Compression,
+    secret: Option<&'k str>,
+) -> FileOptions<'k, 'static, ()> {
+    let mut o: FileOptions<'k, 'static, ()> = SimpleFileOptions::default()
         .compression_method(plan.method)
         .compression_level(plan.level)
         .large_file(s.size >= u64::from(u32::MAX));
+    #[cfg(feature = "zip-aes")]
+    if let Some(p) = secret {
+        o = o.with_aes_encryption(zip::AesMode::Aes256, p);
+    }
+    #[cfg(not(feature = "zip-aes"))]
+    let _ = secret;
     if let Some(mode) = s.mode {
         o = o.unix_permissions(mode);
     }
@@ -365,7 +391,7 @@ fn compress_small(
             io::Error::other(format!("{} grew while being archived", s.path.display())).into(),
         );
     }
-    let mut builder = ZipFileBuilder::new(&s.name, file_options(s, plan))?;
+    let mut builder = ZipFileBuilder::new(&s.name, file_options(s, plan, None))?;
     builder.write_all(&data)?;
     tracker.add_bytes(data.len() as u64, &s.name);
     Ok(builder.finish()?)
@@ -375,13 +401,15 @@ struct Creator<'a, 'o> {
     zw: ZipWriter<BufWriter<&'a mut dyn WriteSeek>>,
     opts: &'o Options,
     plan: Compression,
+    secret: Option<&'o str>,
     tracker: Tracker<'o>,
     buf: Vec<u8>,
 }
 
 impl Creator<'_, '_> {
     fn add_streamed(&mut self, s: &SourceEntry) -> Result<()> {
-        self.zw.start_file(&s.name, file_options(s, self.plan))?;
+        self.zw
+            .start_file(&s.name, file_options(s, self.plan, self.secret))?;
         let mut file = File::open(&s.path)?;
         loop {
             self.opts.check_cancel()?;
@@ -398,7 +426,8 @@ impl Creator<'_, '_> {
     }
 
     fn add_other(&mut self, s: &SourceEntry) -> Result<()> {
-        let options = file_options(s, self.plan);
+        // Directories and link targets carry no file data; they stay unencrypted.
+        let options = file_options(s, self.plan, None);
         match s.kind {
             EntryKind::Dir => self.zw.add_directory(&s.name, options)?,
             EntryKind::Symlink => {
@@ -460,6 +489,7 @@ impl ArchiveFormat for ZipFormat {
     }
 
     fn extract(&self, input: &mut dyn ReadSeek, dest: &Path, opts: &Options) -> Result<Summary> {
+        let secret = opts.secret()?;
         let input_len = stream_len(input)?;
         let shared = Mutex::new(input);
         let mut archive = open(&shared)?;
@@ -483,12 +513,11 @@ impl ArchiveFormat for ZipFormat {
         } else {
             opts.effective_threads().min(plan.files.len()).max(1)
         };
-        run_workers(&shared, &plan.files, &session, threads)?;
+        run_workers(&shared, &plan.files, &session, threads, secret)?;
 
         for link in &plan.links {
             let mut target = Vec::new();
-            archive
-                .by_index(link.index)?
+            entry(&mut archive, link.index, secret)?
                 .take(MAX_LINK_TARGET + 1)
                 .read_to_end(&mut target)?;
             if target.len() as u64 > MAX_LINK_TARGET {
@@ -509,11 +538,19 @@ impl ArchiveFormat for ZipFormat {
         opts: &Options,
     ) -> Result<()> {
         let plan = compression(opts)?;
+        let secret = opts.secret()?;
+        #[cfg(not(feature = "zip-aes"))]
+        if secret.is_some() {
+            return Err(Error::InvalidOption(
+                "zip encryption is not enabled in this build (feature zip-aes)".into(),
+            ));
+        }
         let total = sources.iter().map(|s| s.size).sum();
         let mut c = Creator {
             zw: ZipWriter::new(BufWriter::with_capacity(BUF, out)),
             opts,
             plan,
+            secret,
             tracker: Tracker::new(opts, Some(total), Some(sources.len() as u64)),
             buf: vec![0u8; CHUNK],
         };
@@ -521,7 +558,9 @@ impl ArchiveFormat for ZipFormat {
         let mut batch: Vec<&SourceEntry> = Vec::new();
         for s in sources {
             opts.check_cancel()?;
-            if s.kind == EntryKind::File && s.size <= SMALL_FILE && threads > 1 {
+            // The zip library cannot encrypt outside a ZipWriter, so encrypted archives are serial.
+            if s.kind == EntryKind::File && s.size <= SMALL_FILE && threads > 1 && secret.is_none()
+            {
                 batch.push(s);
                 if batch.len() >= threads * 16 {
                     c.flush_batch(&mut batch, threads)?;

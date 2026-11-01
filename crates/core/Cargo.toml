@@ -8,13 +8,14 @@ license.workspace = true
 authors.workspace = true
 
 [features]
-default = ["zip", "tar", "gzip", "zstd", "bzip2", "xz", "lz4", "brotli", "sevenz", "zip-bzip2", "zip-lzma", "zip-zstd", "zip-deflate64"]
+default = ["zip", "tar", "gzip", "zstd", "bzip2", "xz", "lz4", "brotli", "sevenz", "zip-bzip2", "zip-lzma", "zip-zstd", "zip-deflate64", "zip-aes", "sevenz-aes"]
 zip = ["dep:zip"]
 # Extra zip methods. Deflate64 and LZMA can only be read: the zip crate cannot write them.
 zip-bzip2 = ["zip", "zip/bzip2"]
 zip-lzma = ["zip", "zip/lzma"]
 zip-zstd = ["zip", "zip/zstd"]
 zip-deflate64 = ["zip", "zip/deflate64"]
+zip-aes = ["zip", "zip/aes-crypto"]
 tar = ["dep:tar"]
 gzip = ["dep:flate2"]
 zstd = ["dep:zstd"]
@@ -23,6 +24,7 @@ xz = ["dep:lzma-rust2"]
 lz4 = ["dep:lz4_flex"]
 brotli = ["dep:brotli"]
 sevenz = ["dep:sevenz-rust2"]
+sevenz-aes = ["sevenz", "sevenz-rust2/aes256"]
 
 [dependencies]
 flate2 = { workspace = true, optional = true }

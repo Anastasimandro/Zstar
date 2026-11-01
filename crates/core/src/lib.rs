@@ -49,7 +49,7 @@ pub use detect::{detect, detect_named};
 pub use error::{Error, LimitKind, Result};
 pub use extract::Summary;
 pub use format::{ArchiveFormat, EntryInfo, EntryKind, Format, ReadSeek, WriteSeek, handler};
-pub use options::{CancelToken, Limits, Options, Progress, ProgressFn, ZipMethod};
+pub use options::{CancelToken, Limits, Options, Password, Progress, ProgressFn, ZipMethod};
 pub use path::sanitize as sanitize_entry_name;
 pub use sources::{SourceEntry, collect_sources};
 

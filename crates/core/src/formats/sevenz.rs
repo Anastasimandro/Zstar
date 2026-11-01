@@ -16,7 +16,7 @@ use std::time::SystemTime;
 use sevenz_rust2::encoder_options::{EncoderOptions, Lzma2Options};
 use sevenz_rust2::{
     ArchiveEntry, ArchiveReader, ArchiveWriter, EncoderConfiguration, EncoderMethod, NtTime,
-    Password, SourceReader,
+    Password as SevenZPassword, SourceReader,
 };
 
 use crate::error::{Error, LimitKind, Result};
@@ -53,6 +53,8 @@ fn convert(e: sevenz_rust2::Error) -> Error {
     match e {
         E::Io(e, _) | E::FileOpen(e, _) => e.into(),
         E::MaxMemLimited { .. } => Error::LimitExceeded(LimitKind::Memory),
+        E::PasswordRequired => Error::PasswordRequired,
+        E::MaybeBadPassword(_) => Error::WrongPassword,
         E::UnsupportedCompressionMethod(m) => {
             Error::UnsupportedFormat(format!("7z compression method {m} is not supported"))
         }
@@ -75,6 +77,23 @@ fn dictionary_size(id: &[u8], props: &[u8]) -> Option<u64> {
         })
     } else {
         None
+    }
+}
+
+/// With a password set, a stream that fails to decode means the key was wrong far more often
+/// than the data was damaged (7-Zip reports it the same way). Real I/O errors stay as they are.
+fn wrong_password_if_decoding(e: Error, opts: &Options) -> Error {
+    match e {
+        Error::Io(ref io)
+            if opts.password.is_some()
+                && matches!(
+                    io.kind(),
+                    io::ErrorKind::InvalidData | io::ErrorKind::UnexpectedEof
+                ) =>
+        {
+            Error::WrongPassword
+        }
+        other => other,
     }
 }
 
@@ -106,7 +125,11 @@ fn open<'a>(
     input: &'a mut dyn ReadSeek,
     opts: &Options,
 ) -> Result<ArchiveReader<&'a mut dyn ReadSeek>> {
-    let mut reader = ArchiveReader::new(input, Password::empty()).map_err(convert)?;
+    let secret = match opts.secret()? {
+        Some(p) => SevenZPassword::new(p),
+        None => SevenZPassword::empty(),
+    };
+    let mut reader = ArchiveReader::new(input, secret).map_err(convert)?;
     reader.set_thread_count(opts.effective_threads() as u32);
     let archive = reader.archive();
     if archive.files.len() as u64 > opts.limits.max_entries {
@@ -266,7 +289,7 @@ impl ArchiveFormat for SevenZFormat {
             }
         });
         if let Some(e) = failure {
-            return Err(e);
+            return Err(wrong_password_if_decoding(e, opts));
         }
         result.map_err(convert)?;
         session.finish()
@@ -287,6 +310,13 @@ impl ArchiveFormat for SevenZFormat {
                 )));
             }
         };
+        let secret = opts.secret()?;
+        #[cfg(not(feature = "sevenz-aes"))]
+        if secret.is_some() {
+            return Err(Error::InvalidOption(
+                "7z encryption is not enabled in this build (feature sevenz-aes)".into(),
+            ));
+        }
         let threads = opts.effective_threads() as u32;
         let lzma2 = if threads > 1 {
             Lzma2Options::from_level_mt(level as u32, threads, MT_CHUNK)
@@ -298,10 +328,22 @@ impl ArchiveFormat for SevenZFormat {
         let tracker = Tracker::new(opts, Some(total), Some(sources.len() as u64));
         let result = (|| -> Result<()> {
             let mut writer = ArchiveWriter::new(out).map_err(convert)?;
-            writer.set_content_methods(vec![
+            let mut methods = Vec::with_capacity(2);
+            // Encryption comes first in the list: 7z applies the coders from the last to the
+            // first when writing, so data is compressed and then encrypted. The header is
+            // encrypted too (the library default), which hides the file names.
+            #[cfg(feature = "sevenz-aes")]
+            if let Some(p) = secret {
+                methods.push(
+                    sevenz_rust2::encoder_options::AesEncoderOptions::new(SevenZPassword::new(p))
+                        .into(),
+                );
+            }
+            methods.push(
                 EncoderConfiguration::new(EncoderMethod::LZMA2)
                     .with_options(EncoderOptions::Lzma2(lzma2)),
-            ]);
+            );
+            writer.set_content_methods(methods);
 
             // Directories and empty files carry no data: they go first, then the solid blocks.
             for s in sources {

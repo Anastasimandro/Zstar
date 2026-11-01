@@ -1,15 +1,15 @@
 //! `zstar`: command-line front end for zstar-core.
 
 use std::ffi::OsString;
-use std::io::{IsTerminal, Write};
-use std::path::PathBuf;
+use std::io::{BufRead, BufReader, IsTerminal, Write};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use lexopt::prelude::*;
-use zstar_core::{EntryKind, Error, Format, LimitKind, Options, ZipMethod};
+use zstar_core::{EntryKind, Error, Format, LimitKind, Options, Password, ZipMethod};
 
 /// Release builds set `ZSTAR_VERSION` (see `.github/workflows/release.yml`) so the binary
 /// reports the version of the release it was published in.
@@ -30,6 +30,9 @@ COMMON OPTIONS:
         --config <FILE>    TOML settings (default: the user config file, if it exists)
     -j, --threads <N>      worker threads (default: one per CPU)
     -f, --force            overwrite existing files
+        --password-file <FILE>  read the zip/7z password from the first line of FILE
+                           (- = stdin). Without it the ZSTAR_PASSWORD variable is used.
+                           There is no --password flag: it would show up in `ps`.
     -h, --help             show this help
     -V, --version          show the version
 
@@ -125,6 +128,10 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Cli>, String
         }
     }
     load_config(config.as_deref(), &mut opts)?;
+    opts.password = std::env::var("ZSTAR_PASSWORD")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .map(|v| Password::new(&v));
     let mut p = lexopt::Parser::from_args(args);
 
     while let Some(arg) = p.next().map_err(e)? {
@@ -171,6 +178,10 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Cli>, String
             Long("max-memory") => {
                 let v: String = p.value().map_err(e)?.parse().map_err(e)?;
                 opts.limits.max_memory_bytes = parse_size(&v)?;
+            }
+            Long("password-file") => {
+                let path: PathBuf = p.value().map_err(e)?.into();
+                opts.password = Some(read_password_file(&path)?);
             }
             Long("no-limits") => opts.limits = zstar_core::Limits::unlimited(),
             Value(v) if command.is_none() => command = Some(v.string().map_err(e)?),
@@ -244,6 +255,22 @@ fn progress_printer(start: Instant) -> zstar_core::ProgressFn {
     })
 }
 
+/// First line of `path` (or of stdin for `-`), without its line ending.
+fn read_password_file(path: &Path) -> Result<Password, String> {
+    let mut text = String::new();
+    if path.as_os_str() == "-" {
+        std::io::stdin().read_line(&mut text)
+    } else {
+        std::fs::File::open(path).and_then(|f| BufReader::new(f).read_line(&mut text))
+    }
+    .map_err(|err| format!("cannot read the password file {}: {err}", path.display()))?;
+    let line = text.trim_end_matches(['\r', '\n']);
+    if line.is_empty() {
+        return Err(format!("the password file {} is empty", path.display()));
+    }
+    Ok(Password::new(line))
+}
+
 fn hint(e: &Error) -> &'static str {
     match e {
         Error::LimitExceeded(LimitKind::TotalSize) => {
@@ -259,6 +286,9 @@ fn hint(e: &Error) -> &'static str {
             "raise it with --max-ratio (0 = off) or `max_ratio` under [limits] in the config file, or use --no-limits if you trust the archive"
         }
         Error::AlreadyExists(_) => "use --force to overwrite",
+        Error::PasswordRequired | Error::WrongPassword => {
+            "give the password with --password-file <FILE> or the ZSTAR_PASSWORD variable"
+        }
         _ => "",
     }
 }

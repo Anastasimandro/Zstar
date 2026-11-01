@@ -1,9 +1,11 @@
 # Zstar: decisions
 
-Read this file fully at the start of every phase. It holds closed decisions: do not reopen them. If a task contradicts anything here, stop and tell the owner before continuing.
+Open only the section the current task needs, once. It holds closed decisions: do not reopen them. If a task contradicts anything here, stop and tell the owner before continuing.
 
 ## 1. What this is
 Zstar (provisional name) is a fast, low-memory, cross-platform archive manager written in Rust. Open source, public GitHub repository, license GPL-3.0-only. Priorities in order: performance, low memory, fast startup; then aesthetics. Everything is designed for all platforms from day one; nothing is "left for later" at architecture level.
+
+Quality comes before deadlines: there are no dates. Work advances through milestones that are quality gates, not calendar targets (see ADR 0005). Windows and Android come first; Linux and macOS come later.
 
 The owner speaks Spanish. Code, comments, commits, docs and this file are in English. The app UI ships in Spanish and English.
 
@@ -21,31 +23,34 @@ Windows 10/11 (x64, ARM64), Linux (x64, ARM64), macOS (universal; **macOS tempor
 
 ## 4. Formats
 - Create and extract: zip, tar, tar.gz, tar.bz2, tar.xz, tar.zst, tar.lz4, 7z, single-file gz, bz2, xz, zst, lz4, br.
+- tar.* archives are opened and created as one archive in a single pass: one list of files, and never an intermediate .tar on disk.
 - Extract only: RAR (through libarchive, NEVER the unrar crate), CAB, cpio, ar, deb.
+- RAR is read-only through libarchive, without passwords in v1. A later optional bridge may call an external UnRAR or 7z executable already installed by the user, on Windows only; it is never bundled or linked.
 - Creating RAR is permanently forbidden (proprietary algorithm; the license forbids recreating it). Never add it, not even as an experiment.
-- Out of scope: ISO and exotic formats.
-- Each format sits behind a Cargo feature with a common interface. Detection by magic bytes. AES-256 only for zip and 7z.
+- Out of scope: ISO, libarchive's extra formats (xar, lha, warc, mtree, rpm) and other exotic formats. See ADR 0007.
+- Each format sits behind a Cargo feature with a common interface. Detection by magic bytes; brotli has none, so .br and .tar.br are detected by extension only. AES-256 only for zip and 7z.
 
 ## 5. Engine
 - Streaming with fixed buffers and near-constant memory. Multithreaded with a configurable limit.
 - Write to a .part file and rename on success.
 - Defend against zip slip and decompression bombs. Handle long paths, Windows reserved names, Unix permissions and symlinks, CP437 names.
 - Config in TOML. No tokio unless proven necessary.
-- Release profile: LTO fat, codegen-units=1, panic=abort, strip. PGO comes later.
+- Release profile: LTO fat, codegen-units=1, panic=abort, strip. PGO happens before the first public release, not before.
+- Post-v0.1 improvements, each adopted only with a measurement: parallel decompression (multi-block xz, bzip2, gzip) and a cached index to list and partially extract tar.*.
 - Profiles: Fast, Balanced, Gentle (low priority and few threads, does not slow the system), Auto.
 - Disk detection: ask the OS first; run a short sequential-read measurement only if the OS answers "unknown"; keep a manual per-drive override. HDD: sequential I/O, one stream, big buffers, no parallel many-file extraction. SSD: parallelism.
 - core exposes a control handle: progress, cancel, plus live-adjustable threads, CPU/IO priority and throughput limit. Changing compression level mid-operation is a later improvement and only at block or file boundaries.
 - Benchmarks: hyperfine and peak RAM against 7-Zip and ouch.
 
 ## 6. UI
-- Slint first, egui as plan B; decided in the Phase 0 proof of concept (same dialogs, measure memory, startup, binary size, real effort). Tauri and Dioxus (WebView) are rejected.
+- Slint is decided. Phase 0 stays only as a baseline measurement of cold start, memory and binary size. Tauri and Dioxus (WebView) are rejected.
 - Use Slint only under GPL-3.0-only. Never the Royalty-free license: it is not OSI-approved and SignPath Foundation requires OSI licenses without commercial dual-licensing.
 - Desktop is a lite file manager: WinRAR-style toolbar (Add, Extract to, Test, View, Delete, Info) with Windows Explorer intuition: breadcrumb bar, sidebar tree, sortable details list, multi-select, familiar shortcuts, drag and drop, own context menu, archives opened as folders. Out of v1: search, thumbnails, tabs, network.
 - Progress dialog appears only if the operation lasts more than about 500 ms.
 - The GUI is built only against mockups approved by the owner in Phase 0. Do not invent the design.
 
 ## 7. Android
-Full app with its own file browser. Full file access as the main mode; SAF for external entries (Open with, Share) and cloud. No internet permission. Built with cargo-apk. A minimal Java/Kotlin fragment may be needed for the on-screen keyboard. Parity goals: browse contents, partial extraction, passwords, edit archives (add/remove), multi-part archives, open small files without extracting to a temp folder, multithreading.
+Full app with its own file browser. Full file access as the main mode; SAF for external entries (Open with, Share) and cloud. No internet permission. Built with cargo-apk. UI ladder (ADR 0006): level A, everything in Rust with Slint and no Java/Kotlin; level B, a minimal Kotlin/Java fragment only for the keyboard, Open with or SAF, if level A fails; level C, the whole UI in Kotlin, only as a last resort and with the owner's approval. Before building the app, a throwaway spike in a folder outside the workspace tests keyboard, a long list and TalkBack with pass/fail results; its time limit (about two sessions) is a review point, not a hard stop. Parity goals: browse contents, partial extraction, passwords, edit archives (add/remove), multi-part archives, open small files without extracting to a temp folder, multithreading.
 
 ## 8. Distribution, CI/CD, signing
 - Distribution: GitHub Releases only. No Google Play, no Microsoft Store, no Google developer registration. The README documents Android installation (Google's advanced flow or ADB), after Phase 0 test 9 verifies what that flow offers.
@@ -60,11 +65,12 @@ Full app with its own file browser. Full file access as the main mode; SAF for e
 - Cross-tests: what Zstar creates, 7-Zip and libarchive extract, and the reverse.
 - Fuzzing and a security review for every new format, not only at the end.
 - Benchmarks run in CI and flag regressions.
+- Each task measures only what it touches. The full 1 GiB table across all formats runs only at the end of a phase or when the owner asks. Detailed numbers go to docs/reports/; the chat report stays at 8 lines or fewer.
 - Warnings are errors; clippy clean; no unsafe without a comment explaining why it is sound.
 - Every closed or newly made decision is recorded as a short ADR in docs/adr/.
 
 ## 10. How to work
-- One phase at a time, driven by the phase prompts in docs/prompts/. Do not start the next phase until the current one meets its criteria.
+- One phase at a time; tasks arrive as small step prompts in chat. Do not start the next phase until the current one meets its criteria.
 - Before adding or upgrading any dependency, verify its latest version, license (must pass cargo-deny and be GPL-3.0-only compatible) and maintenance status from the official source. Cite the source. State clearly what you could not verify. Never invent versions or APIs.
 - Pin exact versions in DEPENDENCIES.md and Cargo.toml.
 - Separate facts from your own reasoning in reports.

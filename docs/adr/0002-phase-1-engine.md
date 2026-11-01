@@ -40,3 +40,7 @@ engine decisions that are not already fixed in `docs/DECISIONS.md`.
 - Not done yet: zip entries using bzip2/lzma/zstd/deflate64/PPMd, AES-256, fuzzing, cross-tests
   against 7-Zip and libarchive, and benchmarks against 7-Zip and ouch (all required by
   `docs/DECISIONS.md` section 9 before a format is considered finished).
+
+## Update 2026-11-01
+
+Done since this ADR: zip entries using bzip2, zstd, deflate64 and LZMA, and AES-256. Fuzzing is not part of this update.

@@ -12,3 +12,6 @@ Each ADR has a status, the context, the decision and its consequences. Keep it s
 | [0002](0002-phase-1-engine.md) | Phase 1 engine design | Accepted |
 | [0003](0003-release-flow.md) | Release flow | Accepted |
 | [0004](0004-macos-paused.md) | macOS temporarily paused | Accepted |
+| [0005](0005-milestones-quality-gates.md) | Milestones as quality gates, no dates | Accepted |
+| [0006](0006-android-ui-ladder.md) | Android UI ladder and spike | Accepted |
+| [0007](0007-format-scope.md) | Format scope | Accepted |

@@ -5,3 +5,6 @@
 **/*.rs.bk
 *.pdb
 rustc-ice-*.txt
+
+# Debian packages must never be committed
+*.deb

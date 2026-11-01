@@ -17,7 +17,7 @@ zip-zstd = ["zip", "zip/zstd"]
 zip-deflate64 = ["zip", "zip/deflate64"]
 zip-aes = ["zip", "zip/aes-crypto"]
 tar = ["dep:tar"]
-gzip = ["dep:flate2"]
+gzip = ["dep:flate2", "dep:crc32fast"]
 zstd = ["dep:zstd"]
 bzip2 = ["dep:bzip2"]
 xz = ["dep:lzma-rust2"]
@@ -28,6 +28,7 @@ sevenz-aes = ["sevenz", "sevenz-rust2/aes256"]
 
 [dependencies]
 flate2 = { workspace = true, optional = true }
+crc32fast = { workspace = true, optional = true }
 tar = { workspace = true, optional = true }
 zip = { workspace = true, optional = true }
 zstd = { workspace = true, optional = true }

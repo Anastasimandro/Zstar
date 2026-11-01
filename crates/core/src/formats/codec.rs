@@ -251,10 +251,17 @@ mod imp {
             threads: usize,
             f: impl FnOnce(&mut dyn Write) -> Result<T>,
         ) -> Result<T> {
-            // Only zstd and xz compress on several threads; the rest ignore `threads`, and
+            // Only gzip, zstd and xz compress on several threads; the rest ignore `threads`, and
             // lz4 has no level.
             let _ = (threads, level);
             match self {
+                #[cfg(feature = "gzip")]
+                Codec::Gzip if threads > 1 => {
+                    let mut enc = crate::formats::pargz::ParGz::new(out, level as u32, threads);
+                    let value = f(&mut enc)?;
+                    enc.finish()?;
+                    Ok(value)
+                }
                 #[cfg(feature = "gzip")]
                 Codec::Gzip => {
                     let mut enc =

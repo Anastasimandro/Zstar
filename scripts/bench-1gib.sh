@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Peak RSS and wall time per format on one deterministic 1 GiB file (release build).
 # Usage: scripts/bench-1gib.sh [format...]   (default: every format the CLI accepts below)
-# Env:   BENCH_DIR  work directory with ~3 GiB free (default: ${TMPDIR:-/tmp}/zstar-bench)
+# Env:   BENCH_THREADS  worker threads (-j) for every run, e.g. 1; default: one per CPU
+#        BENCH_DIR  work directory with ~3 GiB free (default: ${TMPDIR:-/tmp}/zstar-bench)
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -59,9 +60,15 @@ for f in "${formats[@]}"; do
   rm -rf "$out" "$dest"
   src="$work/in"; case "$f" in gz|zst|bz2|xz|lz4|br) src="$big";; esac
   # "zip:zstd" means --format zip --zip-method zstd
-  fmt=${f%%:*}; extra=(); [ "$fmt" != "$f" ] && extra=(--zip-method "${f#*:}")
-  c=$(measure "$zstar" compress --format "$fmt" "${extra[@]}" "$out" "$src")
-  x=$(measure "$zstar" extract -o "$dest" "$out")
+  # "zip:aes" / "7z:aes" encrypt with a throwaway password (through ZSTAR_PASSWORD).
+  fmt=${f%%:*}; extra=(); pw=""
+  if [ "$fmt" != "$f" ]; then
+    if [ "${f#*:}" = aes ]; then pw=bench-password; else extra=(--zip-method "${f#*:}"); fi
+  fi
+  # BENCH_THREADS=1 measures the single-threaded code paths.
+  [ -n "${BENCH_THREADS:-}" ] && extra+=(-j "$BENCH_THREADS")
+  c=$(ZSTAR_PASSWORD=$pw measure "$zstar" compress --format "$fmt" "${extra[@]}" "$out" "$src")
+  x=$(ZSTAR_PASSWORD=$pw measure "$zstar" extract -o "$dest" "$out")
   set -- $c; cs=$1; cm=$(( $2 / 1024 ))
   set -- $x; xs=$1; xm=$(( $2 / 1024 ))
   printf '| %s | %s | %s | %s | %s | %s |\n' "$f" "$cs" "$cm" "$xs" "$xm" "$(( $(stat -c %s "$out") / 1048576 ))"

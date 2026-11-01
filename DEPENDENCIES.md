@@ -15,6 +15,7 @@ index when added. `Cargo.lock` is committed and CI builds with `--locked`.
 | flate2 | 1.1.10 | MIT OR Apache-2.0 | core (`gzip` feature) | gzip streams; built with the pure-Rust `zlib-rs` backend |
 | zstd | 0.14.3 | BSD-3-Clause | core (`zstd` feature) | Zstandard streams, multithreaded compression (`zstdmt`) |
 | bzip2 | 0.6.1 | MIT OR Apache-2.0 | core (`bzip2` feature) | bzip2 streams; built on the pure-Rust `libbz2-rs-sys` backend, no C code |
+| crc32fast | 1.5.3 | MIT OR Apache-2.0 | core (`gzip` feature) | CRC-32 of each block and `combine` to join them, for the multithreaded gzip writer |
 | lzma-rust2 | 0.23.0 | Apache-2.0 | core (`xz` feature) | XZ streams (LZMA2), multithreaded compression. Pinned to 0.23.0, not the newest 0.24.0, so that it is the same copy `sevenz-rust2` 0.24.2 uses |
 | lz4_flex | 0.14.0 | MIT | core (`lz4` feature) | LZ4 frame format, pure Rust. Its decoder stops after the first frame; `formats/codec.rs` wraps it to read concatenated frames |
 | brotli | 9.1.1 | BSD-3-Clause AND MIT | core (`brotli` feature) | Brotli streams, pure Rust. Its writer swallows errors while closing; `formats/codec.rs` watches for them |
@@ -35,7 +36,6 @@ index when added. `Cargo.lock` is committed and CI builds with `--locked`.
 | zlib-rs | Zlib | flate2 | Pure-Rust zlib; also what zip's deflate uses |
 | zstd-sys | BSD-3-Clause | zstd | Bundles the reference C implementation of Zstandard (BSD-licensed); needs a C compiler at build time |
 | zstd-safe | BSD-3-Clause | zstd | Safe wrapper over zstd-sys |
-| crc32fast | MIT OR Apache-2.0 | flate2, zip | Checksums |
 | indexmap, hashbrown, equivalent | MIT OR Apache-2.0 | zip | Entry index |
 | typed-path | MIT OR Apache-2.0 | zip | Path handling |
 | rustix, linux-raw-sys, libc | MIT / Apache-2.0 (with LLVM exception) | tempfile, tar | System calls |

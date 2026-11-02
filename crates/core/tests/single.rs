@@ -222,7 +222,7 @@ fn cancelling_leaves_no_part_file_and_no_output() {
         let archive = make(f, tmp.path(), "big.bin", &pseudo(4 << 20, 5));
 
         let mut o = Options::default();
-        let token = o.cancel.clone();
+        let token = o.control.clone();
         o.progress = Some(Arc::new(move |p| {
             if p.bytes_done > 256 * 1024 {
                 token.cancel();
@@ -238,7 +238,7 @@ fn cancelling_leaves_no_part_file_and_no_output() {
         let src = tmp.path().join("big.bin");
         let out = tmp.path().join(format!("again.{}", ext(f)));
         let mut o = Options::default();
-        let token = o.cancel.clone();
+        let token = o.control.clone();
         o.progress = Some(Arc::new(move |p| {
             if p.bytes_done > 256 * 1024 {
                 token.cancel();

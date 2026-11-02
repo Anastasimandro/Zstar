@@ -1,28 +1,8 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
+use crate::control::{Control, WorkerHook, Workers};
 use crate::error::{Error, Result};
-
-/// Cooperative cancellation flag. Clones share the same flag.
-#[derive(Clone, Debug, Default)]
-pub struct CancelToken(Arc<AtomicBool>);
-
-impl CancelToken {
-    /// A fresh, not-yet-cancelled token.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Request cancellation. Safe to call from any thread or a signal handler thread.
-    pub fn cancel(&self) {
-        self.0.store(true, Ordering::Relaxed);
-    }
-
-    /// Whether [`cancel`](Self::cancel) has been called.
-    pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::Relaxed)
-    }
-}
+use crate::profile::{DriveKind, Profile, Settings, cpus, settings_for};
 
 /// A snapshot of how far an operation has got.
 #[derive(Debug, Clone, Copy)]
@@ -153,7 +133,8 @@ impl std::fmt::Debug for Password {
 pub struct Options {
     /// Bomb limits (extraction only).
     pub limits: Limits,
-    /// Worker threads. `0` means one per available CPU.
+    /// Worker threads. `0` means what the profile says (one per CPU for `Fast`). A number
+    /// given here wins over the profile and is the most that can ever run at once.
     pub threads: usize,
     /// Compression level; the valid range depends on the format. `None` uses its default.
     pub level: Option<i32>,
@@ -164,8 +145,19 @@ pub struct Options {
     /// Reject names that Windows cannot create (reserved device names, `:` and so on).
     /// On by default only on Windows.
     pub windows_names: bool,
-    /// Cancellation flag, polled between chunks of data.
-    pub cancel: CancelToken,
+    /// Live control: cancellation, thread limit, priority, throughput limit and profile
+    /// switch. Workers read it between chunks, never inside one. Clones share it, so keep a
+    /// clone to steer the operation from another thread.
+    pub control: Control,
+    /// How hard to work. `Auto` is resolved from [`drive`](Self::drive) when the operation
+    /// starts; see [`Control::set_profile`] to switch while it runs.
+    pub profile: Profile,
+    /// The kind of drive being worked on. The caller finds it out; core never detects
+    /// hardware, and `Unknown` takes the HDD-safe I/O rules.
+    pub drive: DriveKind,
+    /// Called by every thread working for the operation when it starts and whenever it sees
+    /// the priority change. Core makes no OS calls: this is where a priority gets applied.
+    pub worker_hook: Option<WorkerHook>,
     /// Optional progress callback.
     pub progress: Option<ProgressFn>,
     /// File name of the archive being read. A single-file format (gz, zst) has no name of its
@@ -177,6 +169,8 @@ pub struct Options {
     pub password: Option<Password>,
 }
 
+// Not derivable: `windows_names` defaults to true on Windows. Clippy only sees the Linux value.
+#[allow(clippy::derivable_impls)]
 impl Default for Options {
     fn default() -> Self {
         Options {
@@ -186,7 +180,10 @@ impl Default for Options {
             zip_method: None,
             overwrite: false,
             windows_names: cfg!(windows),
-            cancel: CancelToken::new(),
+            control: Control::new(),
+            profile: Profile::default(),
+            drive: DriveKind::default(),
+            worker_hook: None,
             progress: None,
             name_hint: None,
             password: None,
@@ -195,13 +192,48 @@ impl Default for Options {
 }
 
 impl Options {
-    /// The effective worker-thread count (at least 1).
+    /// What [`profile`](Self::profile) and [`drive`](Self::drive) come to on this machine.
+    pub fn settings(&self) -> Settings {
+        settings_for(self.profile, self.drive, cpus())
+    }
+
+    /// The worker-thread count to start with (at least 1).
     pub fn effective_threads(&self) -> usize {
-        if self.threads > 0 {
-            self.threads
-        } else {
-            std::thread::available_parallelism().map_or(1, |n| n.get())
+        self.workers().active()
+    }
+
+    /// Size of the buffer files are copied through.
+    pub(crate) fn io_buffer(&self) -> usize {
+        self.settings().buffer
+    }
+
+    /// The workers of an operation. The pool is every CPU (or `threads`), whatever the
+    /// profile, so a switch from `Gentle` to `Fast` while running has threads to grow into;
+    /// the profile only sets how many of them may run at the start.
+    pub(crate) fn workers(&self) -> Workers {
+        let s = self.settings();
+        let (pool, limit) = match self.threads {
+            0 => (cpus(), s.threads),
+            n => (n, n),
+        };
+        Workers::new(
+            self.control.clone(),
+            self.worker_hook.clone(),
+            pool,
+            limit,
+            s.priority,
+        )
+    }
+
+    #[cfg_attr(not(feature = "zip"), allow(dead_code))]
+    /// Like [`workers`](Self::workers) for extracting many files: a single worker unless the
+    /// drive kind allows parallel extraction.
+    pub(crate) fn file_workers(&self) -> Workers {
+        let mut workers = self.workers();
+        if !self.settings().parallel_files {
+            workers.pool = 1;
         }
+        workers
     }
 
     /// The password, or an error if it is empty.
@@ -216,11 +248,15 @@ impl Options {
         }
     }
 
+    /// The safe point every loop passes: fails once cancelled, and lets the hook know the
+    /// priority of the calling thread when there is one.
     pub(crate) fn check_cancel(&self) -> Result<()> {
-        if self.cancel.is_cancelled() {
-            Err(Error::Cancelled)
-        } else {
-            Ok(())
+        if self.control.is_cancelled() {
+            return Err(Error::Cancelled);
         }
+        if let Some(hook) = &self.worker_hook {
+            self.control.sync_priority(hook, self.settings().priority);
+        }
+        Ok(())
     }
 }

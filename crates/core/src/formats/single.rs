@@ -8,7 +8,7 @@ use std::io::{self, Read};
 use std::path::Path;
 
 use crate::error::{Error, LimitKind, Result};
-use crate::extract::{CHUNK, Session, Summary};
+use crate::extract::{Session, Summary};
 use crate::format::{ArchiveFormat, EntryInfo, EntryKind, Format, ReadSeek, WriteSeek};
 use crate::formats::codec::Codec;
 use crate::formats::stream_len;
@@ -112,7 +112,7 @@ impl ArchiveFormat for SingleFormat {
         let size = self
             .codec
             .with_reader(input, opts.limits.max_memory_bytes, |reader| {
-                let mut buf = vec![0u8; CHUNK];
+                let mut buf = vec![0u8; opts.io_buffer()];
                 let mut size = 0u64;
                 loop {
                     opts.check_cancel()?;
@@ -147,7 +147,7 @@ impl ArchiveFormat for SingleFormat {
                 let session = Session::new(dest, opts, input_len, None, Some(1))?;
                 session.begin_entry()?;
                 let rel = session.rel_path(name.as_bytes())?;
-                let mut buf = vec![0u8; CHUNK];
+                let mut buf = vec![0u8; opts.io_buffer()];
                 session.write_file(&rel, &name, reader, None, None, &mut buf)?;
                 session.finish()
             })
@@ -166,8 +166,8 @@ impl ArchiveFormat for SingleFormat {
         let tracker = Tracker::new(opts, Some(src.size), Some(1));
         let mut file = File::open(&src.path)?;
         self.codec
-            .with_writer(out, level, opts.effective_threads(), |writer| {
-                let mut buf = vec![0u8; CHUNK];
+            .with_writer(out, level, opts.workers(), |writer| {
+                let mut buf = vec![0u8; opts.io_buffer()];
                 loop {
                     opts.check_cancel()?;
                     let n = read_chunk(&mut file, &mut buf)?;

@@ -25,9 +25,6 @@ use crate::options::Options;
 use crate::path::sanitize;
 use crate::progress::Tracker;
 
-/// Size of the fixed copy buffer each worker uses.
-pub(crate) const CHUNK: usize = 128 * 1024;
-
 /// What an extraction did.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Summary {
@@ -108,6 +105,11 @@ impl<'a> Session<'a> {
     #[cfg_attr(not(feature = "tar"), allow(dead_code))]
     pub(crate) fn rel_path(&self, name: &[u8]) -> Result<PathBuf> {
         sanitize(name, self.opts.windows_names)
+    }
+
+    /// Size of the fixed copy buffer each worker uses.
+    pub(crate) fn io_buffer(&self) -> usize {
+        self.opts.io_buffer()
     }
 
     /// Stops all workers: they see [`Error::Cancelled`] at their next check.
@@ -514,7 +516,7 @@ mod tests {
     fn cancel_stops_the_copy_and_leaves_no_part_file() {
         let tmp = tempfile::tempdir().unwrap();
         let opts = Options::default();
-        opts.cancel.cancel();
+        opts.control.cancel();
         let s = session(tmp.path(), &opts);
         let mut buf = vec![0u8; 16];
         let err = s.write_file(

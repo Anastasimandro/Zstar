@@ -26,10 +26,12 @@ impl<'a> Tracker<'a> {
         }
     }
 
-    /// Adds processed bytes, reports progress, and returns the new running total.
+    /// Adds processed bytes, reports progress, and returns the new running total. This is
+    /// also where the throughput limit applies: it may sleep, between chunks.
     pub(crate) fn add_bytes(&self, n: u64, current: &str) -> u64 {
         let total = self.bytes.fetch_add(n, Ordering::Relaxed) + n;
         self.report(total, self.entries.load(Ordering::Relaxed), current);
+        self.opts.control.throttle(n);
         total
     }
 

@@ -9,7 +9,8 @@ Releases currently ship Linux and Windows builds only. macOS is temporarily paus
 
 This repository currently holds the engine and the command line:
 
-- `crates/core`: the archive engine (no UI, stream-based). zip, tar, tar.gz and tar.zst.
+- `crates/core`: the archive engine (no UI, stream-based). Formats: zip, 7z, tar, tar.gz, tar.zst,
+  tar.bz2, tar.xz, tar.lz4, and single files as gz, zst, bz2, xz, lz4 and br (Brotli).
 - `crates/cli`: the `zstar` command.
 
 ```

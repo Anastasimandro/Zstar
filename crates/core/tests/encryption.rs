@@ -266,7 +266,7 @@ fn cancelling_an_encrypted_create_leaves_no_archive() {
         write(&src, &pseudo(1 << 20, 3));
         let out = tmp.path().join(format!("a.{}", ext(format)));
         let opts = with(Some(PW));
-        opts.cancel.cancel();
+        opts.control.cancel();
         let err = create_file(format, &[src], &out, &opts).unwrap_err();
         assert!(matches!(err, Error::Cancelled), "{format:?}: {err}");
         assert!(!out.exists(), "{format:?}");

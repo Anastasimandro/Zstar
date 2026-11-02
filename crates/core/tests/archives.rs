@@ -180,7 +180,7 @@ fn cancelling_mid_extraction_leaves_no_part_files_and_no_partial_file() {
             threads: 2,
             ..Options::default()
         };
-        let token = o.cancel.clone();
+        let token = o.control.clone();
         o.progress = Some(Arc::new(move |p| {
             if p.bytes_done > 256 * 1024 {
                 token.cancel();
@@ -203,7 +203,7 @@ fn cancelling_creation_leaves_no_output() {
         let out = tmp.path().join(format!("a.{}", ext(f)));
 
         let mut o = Options::default();
-        let token = o.cancel.clone();
+        let token = o.control.clone();
         o.progress = Some(Arc::new(move |p| {
             if p.bytes_done > 256 * 1024 {
                 token.cancel();

@@ -6,7 +6,8 @@
 //!
 //! * [`detect`] identifies a format by its magic bytes.
 //! * [`handler`] returns the [`ArchiveFormat`] implementation of a [`Format`].
-//! * [`Options`] carries limits, thread count, progress reporting and cancellation.
+//! * [`Options`] carries limits, thread count, progress reporting and the speed [`Profile`].
+//! * [`Control`] steers a running operation: cancel, threads, priority, throughput limit.
 //!
 //! Extraction is safe by construction: entry names are sanitised, files are written to
 //! `<name>.part` and renamed on success, and decompression-bomb limits are enforced on the
@@ -30,6 +31,7 @@
 )]
 
 pub mod config;
+mod control;
 mod detect;
 mod error;
 mod extract;
@@ -37,6 +39,7 @@ mod format;
 mod formats;
 mod options;
 mod path;
+mod profile;
 mod progress;
 mod sources;
 #[cfg(feature = "zip")]
@@ -45,12 +48,14 @@ mod timeconv;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 
+pub use control::{Control, Priority, WorkerHook};
 pub use detect::{detect, detect_named};
 pub use error::{Error, LimitKind, Result};
 pub use extract::Summary;
 pub use format::{ArchiveFormat, EntryInfo, EntryKind, Format, ReadSeek, WriteSeek, handler};
-pub use options::{CancelToken, Limits, Options, Password, Progress, ProgressFn, ZipMethod};
+pub use options::{Limits, Options, Password, Progress, ProgressFn, ZipMethod};
 pub use path::sanitize as sanitize_entry_name;
+pub use profile::{DriveKind, Profile, Settings, settings_for};
 pub use sources::{SourceEntry, collect_sources};
 
 /// Lists the entries of an archive, detecting its format first.

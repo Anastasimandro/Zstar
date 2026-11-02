@@ -65,7 +65,7 @@ pub enum Error {
     PasswordRequired,
     /// The password does not decrypt the archive.
     WrongPassword,
-    /// The operation was cancelled through its [`CancelToken`](crate::CancelToken).
+    /// The operation was cancelled through its [`Control`](crate::Control).
     Cancelled,
 }
 

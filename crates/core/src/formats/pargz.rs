@@ -6,11 +6,19 @@
 //! starts on a byte boundary. The pieces are concatenated into one ordinary deflate stream,
 //! so any gzip reader can read the result. Memory is a handful of blocks per thread, whatever
 //! the input size.
+//!
+//! The workers are created for the most that can run, and each wave of blocks is shared out
+//! among as many of them as the [`Workers`] allow at that moment. That is the safe point where
+//! a change of thread limit or priority takes effect. Every block is compressed from the same
+//! dictionary whichever worker gets it, so the result is always a valid stream with the same
+//! content; its bytes can still differ slightly between thread counts.
 
 use std::io::{self, Write};
 use std::thread;
 
 use flate2::{Compress, Compression, FlushCompress, Status};
+
+use crate::control::Workers;
 
 /// Uncompressed bytes per block. Small enough to keep memory low, large enough that the sync
 /// flush marker between blocks (5 bytes) is lost in the noise.
@@ -18,10 +26,10 @@ const BLOCK: usize = 256 * 1024;
 /// How far back deflate can reference.
 const WINDOW: usize = 32 * 1024;
 
-/// A gzip writer that compresses on `threads` threads. Call [`ParGz::finish`] when done.
+/// A gzip writer that compresses on several threads. Call [`ParGz::finish`] when done.
 pub(crate) struct ParGz<W: Write> {
     out: W,
-    threads: usize,
+    workers: Workers,
     /// Two blocks per thread: one being compressed while the caller fills the next wave.
     bufs: Vec<Vec<u8>>,
     outs: Vec<Vec<u8>>,
@@ -36,11 +44,11 @@ pub(crate) struct ParGz<W: Write> {
 }
 
 impl<W: Write> ParGz<W> {
-    pub(crate) fn new(out: W, level: u32, threads: usize) -> Self {
-        let threads = threads.max(1);
+    pub(crate) fn new(out: W, level: u32, workers: Workers) -> Self {
+        let threads = workers.pool;
         ParGz {
             out,
-            threads,
+            workers,
             bufs: (0..threads * 2).map(|_| Vec::new()).collect(),
             outs: (0..threads * 2).map(|_| Vec::new()).collect(),
             comps: (0..threads)
@@ -62,6 +70,8 @@ impl<W: Write> ParGz<W> {
             self.header_done = true;
         }
         let n = self.idx + 1;
+        let active = self.workers.active();
+        let workers = &self.workers;
         let final_idx = last.then_some(n - 1);
         let tail = &self.tail;
         let bufs = &self.bufs;
@@ -70,10 +80,9 @@ impl<W: Write> ParGz<W> {
             &prev[prev.len().saturating_sub(WINDOW)..]
         };
 
-        let mut jobs: Vec<Vec<(usize, &mut Vec<u8>)>> =
-            (0..self.threads).map(|_| Vec::new()).collect();
+        let mut jobs: Vec<Vec<(usize, &mut Vec<u8>)>> = (0..active).map(|_| Vec::new()).collect();
         for (i, o) in self.outs.iter_mut().take(n).enumerate() {
-            jobs[i % self.threads].push((i, o));
+            jobs[i % active].push((i, o));
         }
         let crcs: Vec<io::Result<crc32fast::Hasher>> = thread::scope(|scope| {
             let handles: Vec<_> = jobs
@@ -82,6 +91,7 @@ impl<W: Write> ParGz<W> {
                 .map(|(items, comp)| {
                     let (bufs, dict) = (bufs, &dict);
                     scope.spawn(move || {
+                        workers.sync_priority();
                         items
                             .into_iter()
                             .map(|(i, o)| {

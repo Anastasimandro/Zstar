@@ -63,7 +63,7 @@ impl Codec {
         self,
         _out: &mut dyn WriteSeek,
         _level: i32,
-        _threads: usize,
+        _workers: crate::control::Workers,
         _f: impl FnOnce(&mut dyn Write) -> crate::error::Result<T>,
     ) -> crate::error::Result<T> {
         match self {}
@@ -248,16 +248,18 @@ mod imp {
             self,
             out: &mut dyn WriteSeek,
             level: i32,
-            threads: usize,
+            workers: crate::control::Workers,
             f: impl FnOnce(&mut dyn Write) -> Result<T>,
         ) -> Result<T> {
             // Only gzip, zstd and xz compress on several threads; the rest ignore `threads`, and
-            // lz4 has no level.
+            // lz4 has no level. Gzip follows the workers while it runs; the zstd and xz
+            // encoders fix their thread count when they start.
+            let threads = workers.active();
             let _ = (threads, level);
             match self {
                 #[cfg(feature = "gzip")]
-                Codec::Gzip if threads > 1 => {
-                    let mut enc = crate::formats::pargz::ParGz::new(out, level as u32, threads);
+                Codec::Gzip if workers.pool > 1 => {
+                    let mut enc = crate::formats::pargz::ParGz::new(out, level as u32, workers);
                     let value = f(&mut enc)?;
                     enc.finish()?;
                     Ok(value)

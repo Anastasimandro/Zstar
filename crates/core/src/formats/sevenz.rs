@@ -20,7 +20,7 @@ use sevenz_rust2::{
 };
 
 use crate::error::{Error, LimitKind, Result};
-use crate::extract::{CHUNK, Session, Summary};
+use crate::extract::{Session, Summary};
 use crate::format::{ArchiveFormat, EntryInfo, EntryKind, Format, ReadSeek, WriteSeek};
 use crate::formats::stream_len;
 use crate::options::Options;
@@ -172,7 +172,7 @@ struct LazyFile<'a, 'o> {
 
 impl Read for LazyFile<'_, '_> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if self.opts.cancel.is_cancelled() {
+        if self.opts.check_cancel().is_err() {
             return Err(io::Error::other("cancelled"));
         }
         if self.done {
@@ -254,7 +254,7 @@ impl ArchiveFormat for SevenZFormat {
         let total: u64 = reader.archive().files.iter().map(|f| f.size()).sum();
         let count = reader.archive().files.len() as u64;
         let session = Session::new(dest, opts, input_len, Some(total), Some(count))?;
-        let mut buf = vec![0u8; CHUNK];
+        let mut buf = vec![0u8; opts.io_buffer()];
 
         let mut failure: Option<Error> = None;
         let result = reader.for_each_entries(|entry, data| {
@@ -400,7 +400,7 @@ impl ArchiveFormat for SevenZFormat {
             Ok(())
         })();
         result.map_err(|e| {
-            if opts.cancel.is_cancelled() {
+            if opts.control.is_cancelled() {
                 Error::Cancelled
             } else {
                 e

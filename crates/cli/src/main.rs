@@ -9,7 +9,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use lexopt::prelude::*;
-use zstar_core::{EntryKind, Error, Format, LimitKind, Options, Password, ZipMethod};
+use zstar_core::{
+    DriveKind, EntryKind, Error, Format, LimitKind, Options, Password, Profile, ZipMethod,
+};
 
 /// Release builds set `ZSTAR_VERSION` (see `.github/workflows/release.yml`) so the binary
 /// reports the version of the release it was published in.
@@ -28,7 +30,12 @@ USAGE:
 
 COMMON OPTIONS:
         --config <FILE>    TOML settings (default: the user config file, if it exists)
-    -j, --threads <N>      worker threads (default: one per CPU)
+    -j, --threads <N>      worker threads (default: from the profile)
+        --profile <P>      fast, balanced, gentle or auto (default): how many CPUs to use
+                           and at what priority. Auto picks from the drive kind.
+        --drive <KIND>     hdd or ssd: the kind of drive the files are on. The CLI cannot
+                           tell yet, so without it the safe HDD rules apply (one file at
+                           a time, 1 MiB buffers).
     -f, --force            overwrite existing files
         --password-file <FILE>  read the zip/7z password from the first line of FILE
                            (- = stdin). Without it the ZSTAR_PASSWORD variable is used.
@@ -149,6 +156,18 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Cli>, String
             }
             Long("config") => {
                 p.value().map_err(e)?;
+            }
+            Long("profile") => {
+                let v: String = p.value().map_err(e)?.parse().map_err(e)?;
+                opts.profile = Profile::from_name(&v).ok_or(format!(
+                    "unknown profile '{v}' (fast, balanced, gentle, auto)"
+                ))?;
+            }
+            Long("drive") => {
+                let v: String = p.value().map_err(e)?.parse().map_err(e)?;
+                opts.drive = DriveKind::from_name(&v)
+                    .filter(|d| *d != DriveKind::Unknown)
+                    .ok_or(format!("unknown drive '{v}' (hdd, ssd)"))?;
             }
             Short('f') | Long("force") => opts.overwrite = true,
             Short('l') | Long("level") => {
@@ -294,7 +313,7 @@ fn hint(e: &Error) -> &'static str {
 }
 
 fn run(mut cli: Cli) -> Result<(), Error> {
-    let ctrlc_token = cli.opts.cancel.clone();
+    let ctrlc_token = cli.opts.control.clone();
     // Failing to install the handler only costs graceful Ctrl-C, so it is not an error.
     let _ = ctrlc::set_handler(move || ctrlc_token.cancel());
     let start = Instant::now();
@@ -423,6 +442,18 @@ mod tests {
             .unwrap();
         assert_eq!((c.opts.level, c.opts.threads), (Some(3), 2));
         assert!(matches!(c.cmd, Cmd::Compress { ref inputs, .. } if inputs.len() == 2));
+        assert_eq!(
+            (c.opts.profile, c.opts.drive),
+            (Profile::Auto, DriveKind::Unknown)
+        );
+
+        let c = parse(args("extract --profile gentle --drive hdd a.zip"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (c.opts.profile, c.opts.drive),
+            (Profile::Gentle, DriveKind::Hdd)
+        );
 
         let c = parse(args("extract -o dest --max-size 1M --max-ratio 0 a.zip"))
             .unwrap()
@@ -473,6 +504,9 @@ mod tests {
             "extract --bogus a",
             "list a b",
             "compress --format rar a b",
+            "compress --profile turbo a b",
+            "compress --drive nvme a b",
+            "compress --drive unknown a b",
         ] {
             assert!(parse(args(bad)).is_err(), "{bad:?} should fail");
         }

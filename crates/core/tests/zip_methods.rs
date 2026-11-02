@@ -154,7 +154,7 @@ fn bombs_and_cancellation_behave_for_every_method() {
         assert!(find_part_files(&dest).is_empty());
 
         let mut o = with(method);
-        let token = o.cancel.clone();
+        let token = o.control.clone();
         o.progress = Some(Arc::new(move |p| {
             if p.bytes_done > 256 * 1024 {
                 token.cancel();

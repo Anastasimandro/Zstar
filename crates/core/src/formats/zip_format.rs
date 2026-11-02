@@ -16,8 +16,9 @@ use zip::result::ZipResult;
 use zip::write::{FileOptions, PreparedZipFile, SimpleFileOptions, ZipFileBuilder};
 use zip::{CompressionMethod, DateTime, ZipArchive, ZipWriter};
 
+use crate::control::Workers;
 use crate::error::{Error, LimitKind, Result};
-use crate::extract::{CHUNK, Session, Summary};
+use crate::extract::{Session, Summary};
 use crate::format::{ArchiveFormat, EntryInfo, EntryKind, Format, ReadSeek, WriteSeek};
 use crate::formats::stream_len;
 use crate::options::{Options, ZipMethod};
@@ -238,11 +239,17 @@ fn worker(
     session: &Session<'_>,
     next: &AtomicUsize,
     secret: Option<&str>,
+    workers: &Workers,
+    index: usize,
 ) -> Result<()> {
     let mut archive = open(shared)?;
-    let mut buf = vec![0u8; CHUNK];
+    let mut buf = vec![0u8; session.io_buffer()];
     loop {
-        session.check_stop()?;
+        workers.checkpoint(
+            index,
+            || session.check_stop(),
+            || next.load(Ordering::Relaxed) >= files.len(),
+        )?;
         let Some(item) = files.get(next.fetch_add(1, Ordering::Relaxed)) else {
             return Ok(());
         };
@@ -259,11 +266,12 @@ fn run_workers(
     session: &Session<'_>,
     threads: usize,
     secret: Option<&str>,
+    workers: &Workers,
 ) -> Result<()> {
     let next = AtomicUsize::new(0);
     let first_error: Mutex<Option<Error>> = Mutex::new(None);
-    let work = || {
-        if let Err(e) = worker(shared, files, session, &next, secret) {
+    let work = |index: usize| {
+        if let Err(e) = worker(shared, files, session, &next, secret, workers, index) {
             // Record the cause before aborting, so the others' "cancelled" never wins.
             first_error
                 .lock()
@@ -273,13 +281,13 @@ fn run_workers(
         }
     };
     if threads <= 1 {
-        work();
+        work(0);
     } else {
         std::thread::scope(|scope| {
-            for _ in 1..threads {
-                scope.spawn(work);
+            for index in 1..threads {
+                scope.spawn(move || work(index));
             }
-            work();
+            work(0);
         });
     }
     match first_error
@@ -445,9 +453,11 @@ impl Creator<'_, '_> {
             batch.iter().map(|_| Mutex::new(None)).collect();
         let next = AtomicUsize::new(0);
         let (opts, plan, tracker) = (self.opts, self.plan, &self.tracker);
+        let workers = opts.workers();
         std::thread::scope(|scope| {
             for _ in 0..threads.min(batch.len()) {
                 scope.spawn(|| {
+                    workers.sync_priority();
                     loop {
                         let i = next.fetch_add(1, Ordering::Relaxed);
                         let Some(&s) = batch.get(i) else { break };
@@ -508,12 +518,13 @@ impl ArchiveFormat for ZipFormat {
         for rel in &plan.dirs {
             session.make_dir(rel)?;
         }
+        let workers = opts.file_workers();
         let threads = if plan.case_collision {
             1
         } else {
-            opts.effective_threads().min(plan.files.len()).max(1)
+            workers.pool.min(plan.files.len()).max(1)
         };
-        run_workers(&shared, &plan.files, &session, threads, secret)?;
+        run_workers(&shared, &plan.files, &session, threads, secret, &workers)?;
 
         for link in &plan.links {
             let mut target = Vec::new();
@@ -552,12 +563,14 @@ impl ArchiveFormat for ZipFormat {
             plan,
             secret,
             tracker: Tracker::new(opts, Some(total), Some(sources.len() as u64)),
-            buf: vec![0u8; CHUNK],
+            buf: vec![0u8; opts.io_buffer()],
         };
-        let threads = opts.effective_threads();
+        let workers = opts.workers();
         let mut batch: Vec<&SourceEntry> = Vec::new();
         for s in sources {
             opts.check_cancel()?;
+            // Read afresh for every entry: a batch is the unit a change of limit waits for.
+            let threads = workers.active();
             // The zip library cannot encrypt outside a ZipWriter, so encrypted archives are serial.
             if s.kind == EntryKind::File && s.size <= SMALL_FILE && threads > 1 && secret.is_none()
             {
@@ -576,7 +589,7 @@ impl ArchiveFormat for ZipFormat {
             }
             c.tracker.entry_done(&s.name);
         }
-        c.flush_batch(&mut batch, threads)?;
+        c.flush_batch(&mut batch, workers.active())?;
         c.zw.finish()?.flush()?;
         Ok(())
     }

@@ -11,7 +11,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tar::{EntryType, Header};
 
 use crate::error::{Error, Result};
-use crate::extract::{CHUNK, Session, Summary};
+use crate::extract::{Session, Summary};
 use crate::format::{ArchiveFormat, EntryInfo, EntryKind, Format, ReadSeek, WriteSeek};
 use crate::formats::codec::Codec;
 use crate::formats::stream_len;
@@ -147,7 +147,7 @@ struct Counting<'a, 'o> {
 
 impl Read for Counting<'_, '_> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if self.opts.cancel.is_cancelled() {
+        if self.opts.check_cancel().is_err() {
             return Err(io::Error::other("cancelled"));
         }
         let n = self.file.read(buf)?;
@@ -235,7 +235,7 @@ impl ArchiveFormat for TarFormat {
         self.with_reader(input, opts.limits.max_memory_bytes, |reader| {
             let session = Session::new(dest, opts, input_len, None, None)?;
             let mut archive = tar::Archive::new(reader);
-            let mut buf = vec![0u8; CHUNK];
+            let mut buf = vec![0u8; opts.io_buffer()];
             for entry in archive.entries()? {
                 let mut entry = entry?;
                 let ty = entry.header().entry_type();
@@ -296,14 +296,14 @@ impl ArchiveFormat for TarFormat {
             None => write_tar(out, sources, opts).map(drop),
             Some(codec) => {
                 let level = codec.level(opts.level)?;
-                codec.with_writer(out, level, opts.effective_threads(), |w| {
+                codec.with_writer(out, level, opts.workers(), |w| {
                     write_tar(w, sources, opts).map(drop)
                 })
             }
         };
         // A cancelled read surfaces as an I/O error from deep inside the tar builder.
         result.map_err(|e| {
-            if opts.cancel.is_cancelled() {
+            if opts.control.is_cancelled() {
                 Error::Cancelled
             } else {
                 e

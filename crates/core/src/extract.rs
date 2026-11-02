@@ -108,6 +108,7 @@ impl<'a> Session<'a> {
     }
 
     /// Size of the fixed copy buffer each worker uses.
+    #[cfg_attr(not(feature = "zip"), allow(dead_code))]
     pub(crate) fn io_buffer(&self) -> usize {
         self.opts.io_buffer()
     }

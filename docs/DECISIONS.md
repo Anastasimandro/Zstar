@@ -74,5 +74,5 @@ Full app with its own file browser. Full file access as the main mode; SAF for e
 - Before adding or upgrading any dependency, verify its latest version, license (must pass cargo-deny and be GPL-3.0-only compatible) and maintenance status from the official source. Cite the source. State clearly what you could not verify. Never invent versions or APIs.
 - Pin exact versions in DEPENDENCIES.md and Cargo.toml.
 - Separate facts from your own reasoning in reports.
-- Put phase detail in docs/prompts/, not in this file.
+- Put design notes in docs/adr/ and measurement reports in docs/reports/, not in this file.
 - Never commit secrets. Never weaken a security or license rule to make something pass.

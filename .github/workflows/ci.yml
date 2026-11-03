@@ -62,6 +62,9 @@ jobs:
               | while IFS= read -r l; do echo "::error::${l//%/%25}"; done
           fi
           exit "${status:-0}"
+      - name: Drive detection report (informational)
+        shell: bash
+        run: cargo run --locked -q -p zstar-cli -- drive-info .
 
   deny:
     runs-on: ubuntu-latest

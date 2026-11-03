@@ -757,6 +757,7 @@ dependencies = [
  "lexopt",
  "tempfile",
  "zstar-core",
+ "zstar-sys",
 ]
 
 [[package]]
@@ -774,6 +775,15 @@ dependencies = [
  "tempfile",
  "zip",
  "zstd",
+]
+
+[[package]]
+name = "zstar-sys"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "tempfile",
+ "windows-sys",
 ]
 
 [[package]]

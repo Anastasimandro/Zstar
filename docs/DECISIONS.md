@@ -13,9 +13,10 @@ The owner speaks Spanish. Code, comments, commits, docs and this file are in Eng
 Windows 10/11 (x64, ARM64), Linux (x64, ARM64), macOS (universal; **macOS temporarily paused**, see ADR 0004), Android (full app with its own file browser, ZArchiver-level parity). ARM64 is a goal for the first stable release, never a blocker for -rc tags.
 
 ## 3. Workspace (one repo, one Cargo workspace)
-- core: compression, formats, progress, cancellation, encryption. No UI, no OS-specific code, depends on no other workspace crate. Stream-based API (Read/Write/Seek), not only paths. It receives already-resolved drive info; it does not detect hardware itself.
-- cli (binary zstar): terminal only, no graphical dependencies. Depends only on core.
-- gui (binary zstar-gui): single Slint UI for all systems, desktop and touch layouts. Depends only on core.
+- core: compression, formats, progress, cancellation, encryption. No UI, no OS-specific code, no `unsafe`, depends on no other workspace crate. Stream-based API (Read/Write/Seek), not only paths. It receives already-resolved drive info; it does not detect hardware itself.
+- sys: OS queries that core must not make: drive kind (SSD/HDD/unknown) and real thread priority. The only crate allowed to contain `unsafe`. Independent of core and of every other workspace crate; no process is ever spawned. See ADR 0009.
+- cli (binary zstar): terminal only, no graphical dependencies. Depends on core and sys.
+- gui (binary zstar-gui): single Slint UI for all systems, desktop and touch layouts. Depends on core and sys.
 - platform-android: Rust module with JNI; links core and gui.
 - shell-win (COM DLL with IExplorerCommand, sparse/MSIX package, classic registry fallback), shell-linux (Dolphin, Nemo, Thunar, Caja, Nautilus), shell-mac (Quick Actions and .app). shell-* do NOT link core: they are thin launchers that call zstar or zstar-gui with arguments.
 - One or two executables: default is two; decide by measuring cold start in Phase 0.

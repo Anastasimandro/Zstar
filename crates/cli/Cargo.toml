@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 zstar-core.workspace = true
+zstar-sys.workspace = true
 lexopt.workspace = true
 ctrlc.workspace = true
 

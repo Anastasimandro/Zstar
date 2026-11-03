@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/cli"]
+members = ["crates/core", "crates/sys", "crates/cli"]
 
 [workspace.package]
 version = "0.1.0"
@@ -16,6 +16,9 @@ readme = "README.md"
 # Licenses are listed in DEPENDENCIES.md.
 [workspace.dependencies]
 zstar-core = { path = "crates/core", version = "0.1.0" }
+zstar-sys = { path = "crates/sys", version = "0.1.0" }
+libc = "=0.2.191"
+windows-sys = { version = "=0.61.2", default-features = false, features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Ioctl", "Win32_System_Threading"] }
 crc32fast = "=1.5.3"
 flate2 = { version = "=1.1.10", default-features = false, features = ["zlib-rs"] }
 tar = { version = "=0.4.46", default-features = false }

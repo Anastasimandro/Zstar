@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use lexopt::prelude::*;
 use zstar_core::{
-    DriveKind, EntryKind, Error, Format, LimitKind, Options, Password, Profile, ZipMethod,
+    DriveKind, EntryKind, Error, Format, LimitKind, Options, Password, Priority, Profile, ZipMethod,
 };
 
 /// Release builds set `ZSTAR_VERSION` (see `.github/workflows/release.yml`) so the binary
@@ -33,9 +33,10 @@ COMMON OPTIONS:
     -j, --threads <N>      worker threads (default: from the profile)
         --profile <P>      fast, balanced, gentle or auto (default): how many CPUs to use
                            and at what priority. Auto picks from the drive kind.
-        --drive <KIND>     hdd or ssd: the kind of drive the files are on. The CLI cannot
-                           tell yet, so without it the safe HDD rules apply (one file at
-                           a time, 1 MiB buffers).
+        --drive <KIND>     hdd or ssd: the kind of drive the files are on. Without it the
+                           OS is asked about every path involved; if it cannot tell (USB,
+                           network, RAID, ...) the safe HDD rules apply (one file at a
+                           time, 1 MiB buffers).
     -f, --force            overwrite existing files
         --password-file <FILE>  read the zip/7z password from the first line of FILE
                            (- = stdin). Without it the ZSTAR_PASSWORD variable is used.
@@ -78,11 +79,17 @@ enum Cmd {
     List {
         archive: PathBuf,
     },
+    /// Hidden: shows how the drive holding a path was classified.
+    DriveInfo {
+        path: PathBuf,
+    },
 }
 
 struct Cli {
     cmd: Cmd,
     opts: Options,
+    /// `--drive` was given, so the OS is not asked.
+    drive_given: bool,
 }
 
 fn parse_size(s: &str) -> Result<u64, String> {
@@ -126,6 +133,7 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Cli>, String
     let mut output = PathBuf::from(".");
     let mut format = None;
     let mut config: Option<PathBuf> = None;
+    let mut drive_given = false;
     let e = |e: lexopt::Error| e.to_string();
     let args: Vec<OsString> = args.into_iter().collect();
     // Flags override the file, so the file is read first: find --config before parsing.
@@ -168,6 +176,7 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Cli>, String
                 opts.drive = DriveKind::from_name(&v)
                     .filter(|d| *d != DriveKind::Unknown)
                     .ok_or(format!("unknown drive '{v}' (hdd, ssd)"))?;
+                drive_given = true;
             }
             Short('f') | Long("force") => opts.overwrite = true,
             Short('l') | Long("level") => {
@@ -245,10 +254,23 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Cli>, String
                 archive: positional.remove(0),
             }
         }
+        Some("drive-info") => {
+            need(1, "<PATH>")?;
+            if positional.len() > 1 {
+                return Err("drive-info takes one path".into());
+            }
+            Cmd::DriveInfo {
+                path: positional.remove(0),
+            }
+        }
         Some(other) => return Err(format!("unknown command '{other}'")),
         None => return Err("missing command".into()),
     };
-    Ok(Some(Cli { cmd, opts }))
+    Ok(Some(Cli {
+        cmd,
+        opts,
+        drive_given,
+    }))
 }
 
 /// Prints `\r<done>/<total>` to stderr, at most every 100 ms, only when stderr is a terminal.
@@ -312,7 +334,53 @@ fn hint(e: &Error) -> &'static str {
     }
 }
 
+fn drive_from_sys(kind: zstar_sys::DriveKind) -> DriveKind {
+    match kind {
+        zstar_sys::DriveKind::Ssd => DriveKind::Ssd,
+        zstar_sys::DriveKind::Hdd => DriveKind::Hdd,
+        zstar_sys::DriveKind::Unknown => DriveKind::Unknown,
+    }
+}
+
+/// The drive rule for one operation: the worst of all the paths it reads or writes.
+fn detect_drive<'a>(paths: impl IntoIterator<Item = &'a Path>) -> DriveKind {
+    drive_from_sys(zstar_sys::combine(
+        paths.into_iter().map(zstar_sys::drive_kind),
+    ))
+}
+
 fn run(mut cli: Cli) -> Result<(), Error> {
+    if let Cmd::DriveInfo { path } = &cli.cmd {
+        let start = Instant::now();
+        let d = zstar_sys::detect(path);
+        let took = start.elapsed();
+        println!("path: {}", path.display());
+        println!("{d}");
+        println!("time: {:.3} ms (cold)", took.as_secs_f64() * 1e3);
+        return Ok(());
+    }
+    if !cli.drive_given {
+        cli.opts.drive = match &cli.cmd {
+            Cmd::Compress {
+                archive, inputs, ..
+            } => detect_drive(
+                inputs
+                    .iter()
+                    .map(PathBuf::as_path)
+                    .chain([archive.as_path()]),
+            ),
+            Cmd::Extract { archive, output } => detect_drive([archive.as_path(), output.as_path()]),
+            Cmd::List { .. } | Cmd::DriveInfo { .. } => cli.opts.drive,
+        };
+    }
+    cli.opts.worker_hook = Some(Arc::new(|p| {
+        let p = match p {
+            Priority::Normal => zstar_sys::Priority::Normal,
+            Priority::Low => zstar_sys::Priority::Low,
+        };
+        // Failing only means the thread keeps its priority.
+        let _ = zstar_sys::set_current_thread_priority(p);
+    }));
     let ctrlc_token = cli.opts.control.clone();
     // Failing to install the handler only costs graceful Ctrl-C, so it is not an error.
     let _ = ctrlc::set_handler(move || ctrlc_token.cancel());
@@ -388,6 +456,7 @@ fn run(mut cli: Cli) -> Result<(), Error> {
             })?;
             let _ = out.flush();
         }
+        Cmd::DriveInfo { .. } => {}
     }
     Ok(())
 }
@@ -470,6 +539,21 @@ mod tests {
             parse(args("list a.zip")).unwrap().unwrap().cmd,
             Cmd::List { .. }
         ));
+        assert!(matches!(
+            parse(args("drive-info /tmp")).unwrap().unwrap().cmd,
+            Cmd::DriveInfo { .. }
+        ));
+    }
+
+    #[test]
+    fn drive_flag_is_remembered() {
+        assert!(!parse(args("extract a.zip")).unwrap().unwrap().drive_given);
+        assert!(
+            parse(args("extract --drive ssd a.zip"))
+                .unwrap()
+                .unwrap()
+                .drive_given
+        );
     }
 
     #[test]
@@ -503,6 +587,8 @@ mod tests {
             "extract",
             "extract --bogus a",
             "list a b",
+            "drive-info",
+            "drive-info a b",
             "compress --format rar a b",
             "compress --profile turbo a b",
             "compress --drive nvme a b",

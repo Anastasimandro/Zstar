@@ -123,3 +123,36 @@ fn rejects_a_malicious_archive() {
     assert!(stderr(&o).contains("unsafe"), "{}", stderr(&o));
     assert!(!cwd.join("work/evil.txt").exists());
 }
+
+#[test]
+fn drive_info_explains_its_answer() {
+    let tmp = tempfile::tempdir().unwrap();
+    // The output file does not exist yet: the closest existing parent is classified.
+    let missing = tmp.path().join("later").join("out.zip");
+    for path in [tmp.path(), missing.as_path()] {
+        let o = zstar(&["drive-info", &path.to_string_lossy()], tmp.path());
+        assert!(o.status.success(), "{}", stderr(&o));
+        let out = stdout(&o);
+        // CI runners are virtual machines, so the class itself is not asserted.
+        assert!(
+            ["class: ssd", "class: hdd", "class: unknown"]
+                .iter()
+                .any(|c| out.contains(c)),
+            "{out}"
+        );
+        assert!(out.contains("reason: ") && out.contains("time: "), "{out}");
+    }
+}
+
+#[test]
+fn drive_detection_does_not_break_operations() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path();
+    fs::write(cwd.join("a.txt"), "alpha").unwrap();
+    // No --drive: the OS is asked for both the source and the (not yet existing) output.
+    let o = zstar(&["compress", "a.zip", "a.txt"], cwd);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let o = zstar(&["extract", "-o", "dest", "a.zip"], cwd);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert_eq!(fs::read_to_string(cwd.join("dest/a.txt")).unwrap(), "alpha");
+}

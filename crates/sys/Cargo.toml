@@ -1,0 +1,17 @@
+[package]
+name = "zstar-sys"
+description = "OS queries for Zstar: drive kind detection and real thread priority. All unsafe code lives here"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

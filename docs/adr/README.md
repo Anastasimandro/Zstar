@@ -16,3 +16,4 @@ Each ADR has a status, the context, the decision and its consequences. Keep it s
 | [0006](0006-android-ui-ladder.md) | Android UI ladder and spike | Accepted |
 | [0007](0007-format-scope.md) | Format scope | Accepted |
 | [0008](0008-control-handle-and-profiles.md) | Control handle and drive profiles | Accepted |
+| [0009](0009-drive-detection-and-thread-priority.md) | Drive detection and thread priority (crate sys) | Accepted |

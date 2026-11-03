@@ -22,6 +22,8 @@ index when added. `Cargo.lock` is committed and CI builds with `--locked`.
 | sevenz-rust2 | 0.24.2 | Apache-2.0 | core (`sevenz` feature) | 7z reading and writing (LZMA, LZMA2, bzip2, filters). PPMd and Deflate are left out on purpose; `sevenz-aes` enables its `aes256` feature (7z AES-256 + SHA-256 key derivation) |
 | lexopt | 0.3.2 | MIT | cli | Argument parsing without the size and startup cost of a derive framework |
 | ctrlc | 3.5.2 | MIT/Apache-2.0 | cli | Ctrl-C triggers the cooperative cancel token |
+| libc | 0.2.191 | MIT OR Apache-2.0 | sys (Linux only) | `setpriority` and the `ioprio_set` syscall. Already in the lock file through `tar`/`filetime` |
+| windows-sys | 0.61.2 | MIT OR Apache-2.0 | sys (Windows only) | Storage IOCTLs and background thread mode, with only the five `Win32_*` features it needs. Already in the lock file through `ctrlc` |
 | tempfile | 3.27.0 | MIT OR Apache-2.0 | tests only | Temporary directories |
 
 ## Notable transitive dependencies

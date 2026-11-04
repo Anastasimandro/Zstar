@@ -252,6 +252,46 @@ fn stats_block_is_stable_parses_and_is_absent_without_the_flag() {
 }
 
 #[test]
+fn no_seq_hint_is_a_documented_diagnostic_that_changes_no_bytes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join("proj")).unwrap();
+    fs::write(cwd.join("proj/a.txt"), "alpha".repeat(10_000)).unwrap();
+
+    let o = zstar(&["--help"], cwd);
+    assert!(stdout(&o).contains("--no-seq-hint"), "{}", stdout(&o));
+
+    let o = zstar(&["compress", "-j", "2", "hinted.tar.gz", "proj"], cwd);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let o = zstar(
+        &[
+            "compress",
+            "-j",
+            "2",
+            "--no-seq-hint",
+            "plain.tar.gz",
+            "proj",
+        ],
+        cwd,
+    );
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert_eq!(
+        fs::read(cwd.join("hinted.tar.gz")).unwrap(),
+        fs::read(cwd.join("plain.tar.gz")).unwrap()
+    );
+
+    let o = zstar(
+        &["extract", "--no-seq-hint", "-o", "dest", "plain.tar.gz"],
+        cwd,
+    );
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert_eq!(
+        fs::read(cwd.join("dest/proj/a.txt")).unwrap(),
+        "alpha".repeat(10_000).into_bytes()
+    );
+}
+
+#[test]
 fn stats_is_refused_where_it_means_nothing() {
     let tmp = tempfile::tempdir().unwrap();
     let o = zstar(&["list", "--stats", "x.zip"], tmp.path());

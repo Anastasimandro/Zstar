@@ -44,6 +44,9 @@ COMMON OPTIONS:
                            There is no --password flag: it would show up in `ps`.
         --stats            after compress or extract, print a `key: value` block of timings
                            (reading, writing, waiting, MiB/s) to stderr. Off by default.
+        --no-seq-hint      diagnostic: do not give the OS the sequential-read hint when
+                           opening files, to compare it on and off with the same binary.
+                           The hint is on by default; this changes timing only.
     -h, --help             show this help
     -V, --version          show the version
 
@@ -95,6 +98,8 @@ struct Cli {
     drive_given: bool,
     /// `--stats`: print the timing block after the operation.
     stats: bool,
+    /// `--no-seq-hint`: do not install the sequential-read open hook.
+    no_seq_hint: bool,
 }
 
 fn parse_size(s: &str) -> Result<u64, String> {
@@ -140,6 +145,7 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Cli>, String
     let mut config: Option<PathBuf> = None;
     let mut drive_given = false;
     let mut stats = false;
+    let mut no_seq_hint = false;
     let e = |e: lexopt::Error| e.to_string();
     let args: Vec<OsString> = args.into_iter().collect();
     // Flags override the file, so the file is read first: find --config before parsing.
@@ -185,6 +191,7 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Cli>, String
                 drive_given = true;
             }
             Long("stats") => stats = true,
+            Long("no-seq-hint") => no_seq_hint = true,
             Short('f') | Long("force") => opts.overwrite = true,
             Short('l') | Long("level") => {
                 opts.level = Some(p.value().map_err(e)?.parse().map_err(e)?)
@@ -281,6 +288,7 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Cli>, String
         opts,
         drive_given,
         stats,
+        no_seq_hint,
     }))
 }
 
@@ -476,8 +484,11 @@ fn run(mut cli: Cli) -> Result<(), Error> {
         // Failing only means the thread keeps its priority.
         let _ = zstar_sys::set_current_thread_priority(p);
     }));
-    // A hint that cannot be given only means a plain open.
-    cli.opts.open_hook = Some(Arc::new(zstar_sys::open_sequential));
+    // A hint that cannot be given only means a plain open. `--no-seq-hint` leaves the hook
+    // out so the hint can be measured on and off with one binary.
+    if !cli.no_seq_hint {
+        cli.opts.open_hook = Some(Arc::new(zstar_sys::open_sequential));
+    }
     if cli.stats {
         cli.opts.stats = Some(Stats::new());
     }

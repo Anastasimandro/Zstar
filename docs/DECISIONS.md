@@ -39,7 +39,7 @@ Windows 10/11 (x64, ARM64), Linux (x64, ARM64), macOS (universal; **macOS tempor
 - Release profile: LTO fat, codegen-units=1, panic=abort, strip. PGO happens before the first public release, not before.
 - Post-v0.1 improvements, each adopted only with a measurement: parallel decompression (multi-block xz, bzip2, gzip) and a cached index to list and partially extract tar.*.
 - Profiles: Fast, Balanced, Gentle (low priority and few threads, does not slow the system), Auto.
-- Disk detection: ask the OS first; run a short sequential-read measurement only if the OS answers "unknown"; keep a manual per-drive override. HDD: sequential I/O, one stream, big buffers, no parallel many-file extraction. SSD: parallelism.
+- Disk detection: ask the OS; the answer is only a starting hint, never a requirement. There is no measurement at startup; when the OS cannot tell, the safe HDD rules apply. Keep a manual per-drive override. Regulating by measurement while working is deferred to ADR 0010. HDD: sequential I/O, one stream, big buffers, no parallel many-file extraction. SSD: parallelism.
 - Measure-first adaptive I/O (ADR 0010): the engine will regulate itself by measuring throughput and waits; the drive kind (ADR 0009) and the profiles (ADR 0008) stay as starting values and ceilings. Part 1 only measures.
 - core exposes a control handle: progress, cancel, plus live-adjustable threads, CPU/IO priority and throughput limit. Changing compression level mid-operation is a later improvement and only at block or file boundaries.
 - Benchmarks: hyperfine and peak RAM against 7-Zip and ouch.

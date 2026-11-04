@@ -5,8 +5,38 @@ compressing, writing, or waiting. The numbers decide whether the later parts of
 [ADR 0010](../adr/0010-measure-first-adaptive-io.md) are worth building. Nothing below has been
 measured yet: the tables are empty on purpose.
 
-You need a build with `--stats` (the `nightly` pre-release after this change, or
-`cargo build --release -p zstar-cli`). No Python, no administrator rights.
+You need a build with `--stats` and `--no-seq-hint` (the `nightly` pre-release after this
+change, or `cargo build --release -p zstar-cli`). No Python, no administrator rights.
+
+## Quick round (start here)
+
+At most 10 measured runs per machine, source and output on the same disk. Test data `L` and `M`
+are described under "Test data"; how to run one case, cold and warm, and how to collect the
+numbers are in the sections below. The full matrix further down is optional: do it only if the
+quick round leaves a question open.
+
+| # | data | format | op | cache | flags |
+| ---: | --- | --- | --- | --- | --- |
+| 1 | L | tar.gz | compress | cold | |
+| 2 | L | tar.gz | compress | warm | |
+| 3 | M | tar.gz | compress | cold | |
+| 4 | M | tar.gz | compress | warm | |
+| 5 | L | tar.gz | extract | cold | |
+| 6 | M | tar.gz | compress | cold | `--profile gentle` (compare with 3) |
+| 7 | M | zip | extract | cold | |
+| 8 | M | zip | extract | cold | `--no-seq-hint` |
+| 9 | M | 7z | extract | cold | |
+| 10 | M | 7z | extract | cold | `--no-seq-hint` |
+
+Creating the zip and 7z archives of `M` first is setup, not a measured run. Make each cold run
+cold again (see "Cold and warm") and keep the raw `stats` file of every run. Runs 7 to 10 are
+the same extract with and without the hint, so the pairs must be run back to back under the same
+conditions.
+
+zip and 7z archives are read with seeks (the central directory first, then the entries, and 7z
+jumps between its header and its streams), not front to back. The sequential-read hint may
+therefore not help there, and may even cost something. Do not assume either: runs 7 to 10 are
+there to measure it.
 
 ## What `--stats` prints
 
@@ -57,7 +87,7 @@ for d in $(seq 1 200); do mkdir -p small/d$d; for f in $(seq 1 100); do head -c 
 
 ## Cases
 
-For each machine (HDD laptop, SSD laptop) run every row of this matrix:
+Optional full matrix. For each machine (HDD laptop, SSD laptop) run every row of this matrix:
 
 - **Data**: L (`big.bin`) and M (`small`). `gz` stores one file, so it only runs on L.
 - **Placement**: source and output on the **same disk**, and on **different disks** (a second
@@ -71,8 +101,9 @@ For each machine (HDD laptop, SSD laptop) run every row of this matrix:
 
 Optional, to see what the thread count does: repeat the L and M `tar.gz` rows with `-j 1`.
 
-To see what the sequential-read hint does, run the same rows with a build from before this
-change and compare `read_ms`; the hint is always on in the CLI.
+To see what the sequential-read hint does, run the same rows twice with the same binary, once
+as usual and once with `--no-seq-hint`, and compare `read_ms`. The hint is on by default; the
+switch is a diagnostic and changes timing only, not the bytes written.
 
 ## Running one case
 

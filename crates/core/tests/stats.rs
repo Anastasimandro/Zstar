@@ -145,6 +145,16 @@ fn the_open_hook_is_used_and_a_failing_hook_is_not_fatal() {
         "the archive is opened through the hook too"
     );
 
+    // Without a hook (the CLI's `--no-seq-hint`) the plain open gives the same result.
+    let plain = Options::default();
+    assert!(plain.open_hook.is_none());
+    let dest_plain = tmp.path().join("y");
+    extract_file(&out, &dest_plain, &plain).unwrap();
+    assert_eq!(
+        fs::read(dest_plain.join("a.txt")).unwrap(),
+        b"hello hello hello"
+    );
+
     let missing = tmp.path().join("missing.gz");
     assert!(extract_file(&missing, &dest, &failing).is_err());
 }

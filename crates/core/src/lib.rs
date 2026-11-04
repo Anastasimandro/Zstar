@@ -42,6 +42,7 @@ mod path;
 mod profile;
 mod progress;
 mod sources;
+mod stats;
 #[cfg(feature = "zip")]
 mod timeconv;
 
@@ -53,10 +54,11 @@ pub use detect::{detect, detect_named};
 pub use error::{Error, LimitKind, Result};
 pub use extract::Summary;
 pub use format::{ArchiveFormat, EntryInfo, EntryKind, Format, ReadSeek, WriteSeek, handler};
-pub use options::{Limits, Options, Password, Progress, ProgressFn, ZipMethod};
+pub use options::{Limits, OpenHook, Options, Password, Progress, ProgressFn, ZipMethod};
 pub use path::sanitize as sanitize_entry_name;
 pub use profile::{DriveKind, Profile, Settings, settings_for};
 pub use sources::{SourceEntry, collect_sources};
+pub use stats::{Stats, StatsSnapshot};
 
 /// Lists the entries of an archive, detecting its format first.
 ///
@@ -98,12 +100,15 @@ fn named_after(path: &Path, opts: &Options) -> Options {
 
 /// Lists the archive at `path`.
 pub fn list_file(path: &Path, opts: &Options, visit: &mut dyn FnMut(EntryInfo)) -> Result<Format> {
-    list(&mut File::open(path)?, &named_after(path, opts), visit)
+    let opts = named_after(path, opts);
+    list(&mut opts.open_source(path)?, &opts, visit)
 }
 
 /// Extracts the archive at `path` into `dest`.
 pub fn extract_file(path: &Path, dest: &Path, opts: &Options) -> Result<Summary> {
-    extract(&mut File::open(path)?, dest, &named_after(path, opts))
+    let opts = named_after(path, opts);
+    let mut input = opts.open_source(path)?;
+    stats::timed_op(opts.stats.as_ref(), || extract(&mut input, dest, &opts))
 }
 
 /// Archives `inputs` into a new file at `output`, written as `<output>.part` and renamed
@@ -133,9 +138,12 @@ pub fn create_file(
     let part_abs = extract::part_path(&output_abs);
     let sources = collect_sources(inputs, &[output_abs, part_abs])?;
 
-    let written = File::create(&part)
-        .map_err(Error::from)
-        .and_then(|mut file| handler.create(&sources, &mut file, opts));
+    let written = File::create(&part).map_err(Error::from).and_then(|file| {
+        let mut file = stats::Timed::new(file, opts.stats.clone());
+        stats::timed_op(opts.stats.as_ref(), || {
+            handler.create(&sources, &mut file, opts)
+        })
+    });
     let renamed = written.and_then(|()| fs::rename(&part, output).map_err(Error::from));
     if renamed.is_err() {
         let _ = fs::remove_file(&part);

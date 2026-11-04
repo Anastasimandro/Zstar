@@ -8,7 +8,6 @@
 //! Methods supported: LZMA, LZMA2, bzip2, Copy and the BCJ/Delta filters. PPMd and Deflate
 //! are not built in, and an archive that needs them fails with a clear error.
 
-use std::fs::File;
 use std::io::{self, Cursor, Read};
 use std::path::Path;
 use std::time::SystemTime;
@@ -26,6 +25,7 @@ use crate::formats::stream_len;
 use crate::options::Options;
 use crate::progress::Tracker;
 use crate::sources::SourceEntry;
+use crate::stats::Source;
 
 pub(crate) struct SevenZFormat;
 
@@ -164,7 +164,7 @@ fn describe(entry: &ArchiveEntry) -> EntryInfo {
 struct LazyFile<'a, 'o> {
     path: &'a Path,
     name: &'a str,
-    file: Option<File>,
+    file: Option<Source>,
     done: bool,
     opts: &'a Options,
     tracker: &'a Tracker<'o>,
@@ -179,7 +179,7 @@ impl Read for LazyFile<'_, '_> {
             return Ok(0);
         }
         if self.file.is_none() {
-            self.file = Some(File::open(self.path)?);
+            self.file = Some(self.opts.open_source(self.path)?);
         }
         let n = self.file.as_mut().map_or(Ok(0), |f| f.read(buf))?;
         if n == 0 {

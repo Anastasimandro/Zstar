@@ -4,7 +4,6 @@
 //! for the moment bytes are fetched; inflating and writing happen outside the lock.
 
 use std::collections::HashSet;
-use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -391,7 +390,7 @@ fn compress_small(
 ) -> Result<PreparedZipFile> {
     opts.check_cancel()?;
     let mut data = Vec::with_capacity(s.size as usize);
-    File::open(&s.path)?
+    opts.open_source(&s.path)?
         .take(SMALL_FILE + 1)
         .read_to_end(&mut data)?;
     if data.len() as u64 > SMALL_FILE {
@@ -418,7 +417,7 @@ impl Creator<'_, '_> {
     fn add_streamed(&mut self, s: &SourceEntry) -> Result<()> {
         self.zw
             .start_file(&s.name, file_options(s, self.plan, self.secret))?;
-        let mut file = File::open(&s.path)?;
+        let mut file = self.opts.open_source(&s.path)?;
         loop {
             self.opts.check_cancel()?;
             let n = match file.read(&mut self.buf) {

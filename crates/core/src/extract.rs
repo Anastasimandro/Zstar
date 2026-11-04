@@ -225,7 +225,9 @@ impl<'a> Session<'a> {
                 Err(e) => return Err(e.into()),
             };
             self.charge(n as u64, name)?;
-            file.write_all(&buf[..n])?;
+            crate::stats::timed_write(self.opts.stats.as_ref(), n as u64, || {
+                file.write_all(&buf[..n])
+            })?;
         }
         #[cfg(unix)]
         if let Some(mode) = mode {

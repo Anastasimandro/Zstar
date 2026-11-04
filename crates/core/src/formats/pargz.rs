@@ -15,6 +15,7 @@
 
 use std::io::{self, Write};
 use std::thread;
+use std::time::Instant;
 
 use flate2::{Compress, Compression, FlushCompress, Status};
 
@@ -92,7 +93,8 @@ impl<W: Write> ParGz<W> {
                     let (bufs, dict) = (bufs, &dict);
                     scope.spawn(move || {
                         workers.sync_priority();
-                        items
+                        let started = workers.stats.as_ref().map(|_| Instant::now());
+                        let done = items
                             .into_iter()
                             .map(|(i, o)| {
                                 deflate_block(comp, dict(i), &bufs[i], final_idx == Some(i), o)?;
@@ -100,7 +102,12 @@ impl<W: Write> ParGz<W> {
                                 h.update(&bufs[i]);
                                 Ok((i, h))
                             })
-                            .collect::<Vec<io::Result<(usize, crc32fast::Hasher)>>>()
+                            .collect::<Vec<io::Result<(usize, crc32fast::Hasher)>>>();
+                        // One add per thread per wave, so the hot path stays free of atomics.
+                        if let (Some(stats), Some(t)) = (&workers.stats, started) {
+                            stats.add_codec_cpu(t.elapsed());
+                        }
+                        done
                     })
                 })
                 .collect();

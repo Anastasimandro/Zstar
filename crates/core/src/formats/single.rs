@@ -3,7 +3,6 @@
 //! Extraction goes through the shared [`Session`], so the `.part` rename, the bomb limits and
 //! cancellation behave exactly as they do for archives.
 
-use std::fs::File;
 use std::io::{self, Read};
 use std::path::Path;
 
@@ -164,7 +163,7 @@ impl ArchiveFormat for SingleFormat {
         only_one_file(sources, self.format.name())?;
         let src = &sources[0];
         let tracker = Tracker::new(opts, Some(src.size), Some(1));
-        let mut file = File::open(&src.path)?;
+        let mut file = opts.open_source(&src.path)?;
         self.codec
             .with_writer(out, level, opts.workers(), |writer| {
                 let mut buf = vec![0u8; opts.io_buffer()];

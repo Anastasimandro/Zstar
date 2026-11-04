@@ -3,7 +3,6 @@
 //! Everything is streamed through fixed buffers: memory use does not depend on archive or
 //! entry size. tar itself is sequential, so only zstd and xz compression use extra threads.
 
-use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -18,6 +17,7 @@ use crate::formats::stream_len;
 use crate::options::Options;
 use crate::progress::Tracker;
 use crate::sources::SourceEntry;
+use crate::stats::Source;
 
 const BUF: usize = 64 * 1024;
 /// Longest hard-link or symlink target we accept.
@@ -139,7 +139,7 @@ impl<R: Read> Read for Exact<R> {
 
 /// A file reader that honours cancellation and reports progress.
 struct Counting<'a, 'o> {
-    file: File,
+    file: Source,
     opts: &'a Options,
     tracker: &'a Tracker<'o>,
     name: &'a str,
@@ -176,7 +176,7 @@ fn write_tar<W: Write>(w: W, sources: &[SourceEntry], opts: &Options) -> Result<
                 header.set_mode(s.mode.unwrap_or(0o644));
                 header.set_size(s.size);
                 let reader = Counting {
-                    file: File::open(&s.path)?,
+                    file: opts.open_source(&s.path)?,
                     opts,
                     tracker: &tracker,
                     name: &s.name,

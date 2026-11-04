@@ -1,8 +1,12 @@
+use std::fs::File;
+use std::io;
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::control::{Control, WorkerHook, Workers};
 use crate::error::{Error, Result};
 use crate::profile::{DriveKind, Profile, Settings, cpus, settings_for};
+use crate::stats::{Source, Stats, StatsSnapshot, Timed};
 
 /// A snapshot of how far an operation has got.
 #[derive(Debug, Clone, Copy)]
@@ -18,6 +22,10 @@ pub struct Progress<'a> {
     /// Name of the entry being processed.
     pub current: &'a str,
 }
+
+/// Opens a source file for reading, ideally with a sequential-access hint. Core makes no OS
+/// calls: the caller supplies this, like [`WorkerHook`].
+pub type OpenHook = Arc<dyn Fn(&Path) -> io::Result<File> + Send + Sync>;
 
 /// Progress callback. It may be called from several threads at once.
 pub type ProgressFn = Arc<dyn Fn(&Progress<'_>) + Send + Sync>;
@@ -158,6 +166,13 @@ pub struct Options {
     /// Called by every thread working for the operation when it starts and whenever it sees
     /// the priority change. Core makes no OS calls: this is where a priority gets applied.
     pub worker_hook: Option<WorkerHook>,
+    /// How source files and archives are opened for reading. `None` is `File::open`. If the
+    /// hook fails the file is opened plainly, so a hint that cannot be given never fails an
+    /// operation.
+    pub open_hook: Option<OpenHook>,
+    /// Timing counters for one operation; `None` (the default) measures nothing. Clones share
+    /// them, so keep one to read the totals afterwards (see [`stats_snapshot`](Self::stats_snapshot)).
+    pub stats: Option<Stats>,
     /// Optional progress callback.
     pub progress: Option<ProgressFn>,
     /// File name of the archive being read. A single-file format (gz, zst) has no name of its
@@ -184,6 +199,8 @@ impl Default for Options {
             profile: Profile::default(),
             drive: DriveKind::default(),
             worker_hook: None,
+            open_hook: None,
+            stats: None,
             progress: None,
             name_hint: None,
             password: None,
@@ -211,6 +228,12 @@ impl Options {
     /// profile, so a switch from `Gentle` to `Fast` while running has threads to grow into;
     /// the profile only sets how many of them may run at the start.
     pub(crate) fn workers(&self) -> Workers {
+        let workers = self.build_workers();
+        self.note_threads(&workers);
+        workers
+    }
+
+    fn build_workers(&self) -> Workers {
         let s = self.settings();
         let (pool, limit) = match self.threads {
             0 => (cpus(), s.threads),
@@ -222,18 +245,44 @@ impl Options {
             pool,
             limit,
             s.priority,
+            self.stats.clone(),
         )
+    }
+
+    fn note_threads(&self, workers: &Workers) {
+        if let Some(stats) = &self.stats {
+            stats.note_threads(workers.pool, workers.active());
+        }
     }
 
     #[cfg_attr(not(feature = "zip"), allow(dead_code))]
     /// Like [`workers`](Self::workers) for extracting many files: a single worker unless the
     /// drive kind allows parallel extraction.
     pub(crate) fn file_workers(&self) -> Workers {
-        let mut workers = self.workers();
+        let mut workers = self.build_workers();
         if !self.settings().parallel_files {
             workers.pool = 1;
         }
+        self.note_threads(&workers);
         workers
+    }
+
+    /// Opens `path` for reading through [`open_hook`](Self::open_hook), with its reads timed
+    /// when stats are on.
+    pub(crate) fn open_source(&self, path: &Path) -> io::Result<Source> {
+        let file = match &self.open_hook {
+            Some(hook) => hook(path).or_else(|_| File::open(path))?,
+            None => File::open(path)?,
+        };
+        Ok(Timed::new(file, self.stats.clone()))
+    }
+
+    /// The totals of [`stats`](Self::stats) so far, with the time workers spent parked by the
+    /// control. `None` when stats are off.
+    pub fn stats_snapshot(&self) -> Option<StatsSnapshot> {
+        self.stats
+            .as_ref()
+            .map(|s| s.snapshot(self.control.parked()))
     }
 
     /// The password, or an error if it is empty.

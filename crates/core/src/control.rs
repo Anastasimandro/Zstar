@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 
 use crate::error::Result;
 use crate::profile::{Profile, cpu_rules, cpus};
+use crate::stats::Stats;
 
 /// How much a worker should yield to the rest of the system.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -59,6 +60,8 @@ struct Inner {
     /// Token bucket in virtual time: when it runs empty, in nanoseconds since `epoch`.
     empty_at: AtomicU64,
     epoch: Instant,
+    /// Nanoseconds workers have slept because of the rate or thread limit, summed over threads.
+    parked_ns: AtomicU64,
 }
 
 impl Default for Control {
@@ -78,6 +81,7 @@ impl Control {
             rate: AtomicU64::new(0),
             empty_at: AtomicU64::new(0),
             epoch: Instant::now(),
+            parked_ns: AtomicU64::new(0),
         }))
     }
 
@@ -155,6 +159,17 @@ impl Control {
         }
     }
 
+    /// Total time workers have slept because of the throughput limit or because the thread
+    /// limit made them wait, summed over threads.
+    pub fn parked(&self) -> Duration {
+        Duration::from_nanos(self.0.parked_ns.load(Relaxed))
+    }
+
+    fn add_parked(&self, since: Instant) {
+        let ns = u64::try_from(since.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        self.0.parked_ns.fetch_add(ns, Relaxed);
+    }
+
     /// Accounts for `bytes` just processed and sleeps if the throughput limit says so.
     ///
     /// With no limit this is one atomic load. Called between chunks, never inside one.
@@ -179,12 +194,17 @@ impl Control {
             }
         };
         let mut left = Duration::from_nanos(wait);
+        if left.is_zero() {
+            return;
+        }
+        let slept = Instant::now();
         // A changed limit or a cancel ends the wait: the new rate applies from the next chunk.
         while !left.is_zero() && !self.is_cancelled() && self.rate_limit() == rate {
             let step = left.min(SLICE);
             std::thread::sleep(step);
             left -= step;
         }
+        self.add_parked(slept);
     }
 
     /// Tells `hook` about this thread's priority if it has not heard it yet. `base` is used
@@ -228,6 +248,9 @@ pub(crate) struct Workers {
     limit: usize,
     /// Priority to use while the control has none of its own.
     priority: Priority,
+    /// Where per-thread timings are added when stats are on.
+    #[cfg_attr(not(feature = "gzip"), allow(dead_code))]
+    pub(crate) stats: Option<Stats>,
 }
 
 impl Workers {
@@ -237,6 +260,7 @@ impl Workers {
         pool: usize,
         limit: usize,
         priority: Priority,
+        stats: Option<Stats>,
     ) -> Self {
         Workers {
             control,
@@ -244,6 +268,7 @@ impl Workers {
             pool: pool.max(1),
             limit,
             priority,
+            stats,
         }
     }
 
@@ -278,9 +303,16 @@ impl Workers {
     ) -> Result<()> {
         stop()?;
         self.sync_priority();
-        while index >= self.active() && !finished() {
-            std::thread::sleep(PARK);
-            stop()?;
+        if index >= self.active() && !finished() {
+            let parked = Instant::now();
+            while index >= self.active() && !finished() {
+                std::thread::sleep(PARK);
+                if let Err(e) = stop() {
+                    self.control.add_parked(parked);
+                    return Err(e);
+                }
+            }
+            self.control.add_parked(parked);
         }
         Ok(())
     }
@@ -341,7 +373,7 @@ mod tests {
     #[test]
     fn active_follows_the_control_within_the_pool() {
         let c = Control::new();
-        let w = Workers::new(c.clone(), None, 4, 2, Priority::Normal);
+        let w = Workers::new(c.clone(), None, 4, 2, Priority::Normal, None);
         assert_eq!(w.active(), 2);
         c.set_threads(9);
         assert_eq!(w.active(), 4);
@@ -349,7 +381,10 @@ mod tests {
         assert_eq!(w.active(), 1);
         c.set_threads(0);
         assert_eq!(w.active(), 2);
-        assert_eq!(Workers::new(c, None, 0, 0, Priority::Normal).active(), 1);
+        assert_eq!(
+            Workers::new(c, None, 0, 0, Priority::Normal, None).active(),
+            1
+        );
     }
 
     #[test]
@@ -358,7 +393,7 @@ mod tests {
         let log = heard.clone();
         let hook: WorkerHook = Arc::new(move |p| log.lock().unwrap().push(p));
         let c = Control::new();
-        let w = Workers::new(c.clone(), Some(hook), 2, 2, Priority::Normal);
+        let w = Workers::new(c.clone(), Some(hook), 2, 2, Priority::Normal, None);
 
         w.sync_priority();
         w.sync_priority();
@@ -377,7 +412,7 @@ mod tests {
     #[test]
     fn a_waiting_worker_gives_way_to_cancel_and_to_the_end_of_the_work() {
         let c = Control::new();
-        let w = Workers::new(c.clone(), None, 4, 1, Priority::Normal);
+        let w = Workers::new(c.clone(), None, 4, 1, Priority::Normal, None);
         let ok = || Ok(());
         // Worker 0 is never held; worker 3 is above the limit but there is nothing left.
         assert!(w.checkpoint(0, ok, || false).is_ok());
@@ -395,5 +430,36 @@ mod tests {
             w.checkpoint(3, stop, || false),
             Err(Error::Cancelled)
         ));
+    }
+
+    #[test]
+    fn time_slept_under_a_limit_is_counted_as_parked() {
+        let c = Control::new();
+        c.throttle(1 << 30); // no limit: no sleep, nothing counted
+        assert_eq!(c.parked(), Duration::ZERO);
+        c.set_rate_limit(1000);
+        c.throttle(100); // 100 ms of budget on an empty bucket
+        let slept = c.parked();
+        assert!(slept >= Duration::from_millis(40), "{slept:?}");
+        assert!(slept < Duration::from_secs(5), "{slept:?}");
+    }
+
+    #[test]
+    fn a_parked_worker_counts_its_waiting_and_a_free_one_does_not() {
+        let c = Control::new();
+        let w = Workers::new(c.clone(), None, 4, 1, Priority::Normal, None);
+        w.checkpoint(0, || Ok(()), || false).unwrap();
+        assert_eq!(c.parked(), Duration::ZERO);
+        let waited = std::cell::Cell::new(0);
+        w.checkpoint(
+            2,
+            || Ok(()),
+            || {
+                waited.set(waited.get() + 1);
+                waited.get() > 2
+            },
+        )
+        .unwrap();
+        assert!(c.parked() >= Duration::from_millis(20), "{:?}", c.parked());
     }
 }

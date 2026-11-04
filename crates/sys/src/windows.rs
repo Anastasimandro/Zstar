@@ -18,8 +18,8 @@ use std::path::{Path, PathBuf};
 use std::ptr;
 
 use windows_sys::Win32::Storage::FileSystem::{
-    GetDriveTypeW, GetVolumeNameForVolumeMountPointW, GetVolumePathNameW,
-    IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
+    FILE_FLAG_SEQUENTIAL_SCAN, GetDriveTypeW, GetVolumeNameForVolumeMountPointW,
+    GetVolumePathNameW, IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
 };
 use windows_sys::Win32::System::IO::DeviceIoControl;
 use windows_sys::Win32::System::Ioctl::IOCTL_STORAGE_QUERY_PROPERTY;
@@ -36,13 +36,42 @@ const FILE_SHARE_ALL: u32 = 7; // read | write | delete
 const STORAGE_DEVICE_PROPERTY: u32 = 0;
 const STORAGE_DEVICE_SEEK_PENALTY_PROPERTY: u32 = 7;
 
+/// A network (SMB) path, in either the `\\server` or the `\\?\UNC\` form.
+fn is_unc(text: &str) -> bool {
+    text.starts_with(r"\\?\UNC\")
+        || (text.starts_with(r"\\") && !text.starts_with(r"\\?\") && !text.starts_with(r"\\.\"))
+}
+
+/// `FILE_FLAG_SEQUENTIAL_SCAN` is a plain flag on the normal open, so this needs no unsafe.
+pub(crate) fn open_sequential(path: &Path) -> io::Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_SEQUENTIAL_SCAN)
+        .open(path)
+}
+
+/// The volume GUID holding `path` (or its closest existing parent). `None` for network
+/// paths and when a query fails.
+pub(crate) fn volume_of(path: &Path) -> Option<String> {
+    let existing = existing_ancestor(path);
+    let p = plain(std::fs::canonicalize(&existing).unwrap_or(existing));
+    let text = p.to_string_lossy();
+    if is_unc(&text) {
+        return None;
+    }
+    let root = volume_root(&p)?;
+    // SAFETY: `root` is NUL-terminated and outlives the call.
+    if unsafe { GetDriveTypeW(root.as_ptr()) } == DRIVE_REMOTE {
+        return None;
+    }
+    volume_guid(&root)
+}
+
 pub(crate) fn detect(path: &Path) -> Detection {
     let existing = existing_ancestor(path);
     let p = plain(std::fs::canonicalize(&existing).unwrap_or(existing));
     let text = p.to_string_lossy();
-    if text.starts_with(r"\\?\UNC\")
-        || (text.starts_with(r"\\") && !text.starts_with(r"\\?\") && !text.starts_with(r"\\.\"))
-    {
+    if is_unc(&text) {
         return Detection::unknown("network path (SMB): the medium is not visible from here");
     }
     let Some(root) = volume_root(&p) else {

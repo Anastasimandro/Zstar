@@ -3,13 +3,28 @@
 //! The sysfs root and the mountinfo text are parameters of [`resolve`], so tests run it on
 //! fake trees.
 
-use std::fs;
+use std::fs::{self, File};
 use std::io;
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path};
 
 use crate::rules::combine;
 use crate::{Detection, DriveKind, Priority, cached, existing_ancestor};
+
+/// `st_dev` of `path` or its closest existing parent.
+pub(crate) fn device_id(path: &Path) -> Option<u64> {
+    fs::metadata(existing_ancestor(path)).ok().map(|m| m.dev())
+}
+
+/// Plain open plus a sequential-access hint. The hint's result is ignored on purpose.
+pub(crate) fn open_sequential(path: &Path) -> io::Result<File> {
+    let file = File::open(path)?;
+    // SAFETY: posix_fadvise takes the descriptor, which `file` keeps open for the whole call,
+    // and two plain integers (offset 0, length 0 = to the end of the file); it reads no memory.
+    let _ = unsafe { libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_SEQUENTIAL) };
+    Ok(file)
+}
 
 /// How deep `slaves` (device-mapper, md) are followed, and how many at one level.
 const MAX_DEPTH: u8 = 3;

@@ -1,4 +1,5 @@
-//! OS queries for Zstar: which kind of drive holds a path, and real thread priority.
+//! OS queries for Zstar: which kind of drive holds a path, real thread priority, a
+//! sequential-read hint for source files and a same-device check.
 //!
 //! This crate is independent of `zstar-core` and is the only place in the workspace that may
 //! contain `unsafe`. Detection never spawns a process, never panics and answers `Unknown`
@@ -8,6 +9,8 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use std::fmt;
+use std::fs::File;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -118,6 +121,43 @@ pub fn detect(path: &Path) -> Detection {
     }
 }
 
+/// Opens `path` for reading and tells the OS the file will be read from start to end
+/// (Windows: `FILE_FLAG_SEQUENTIAL_SCAN`; Linux: `posix_fadvise(POSIX_FADV_SEQUENTIAL)`; other
+/// systems: a plain open). The hint is best effort: if it cannot be given the file is opened
+/// anyway, so this fails only when `File::open` would.
+pub fn open_sequential(path: &Path) -> io::Result<File> {
+    #[cfg(target_os = "linux")]
+    return open_hinted(path, linux::open_sequential);
+    #[cfg(windows)]
+    return open_hinted(path, windows::open_sequential);
+    #[cfg(not(any(target_os = "linux", windows)))]
+    File::open(path)
+}
+
+#[cfg_attr(not(any(target_os = "linux", windows, test)), allow(dead_code))]
+fn open_hinted(path: &Path, hinted: impl FnOnce(&Path) -> io::Result<File>) -> io::Result<File> {
+    hinted(path).or_else(|_| File::open(path))
+}
+
+/// Whether `a` and `b` live on the same device: `Some(true)` or `Some(false)`, or `None` when
+/// the OS did not say (network paths, a failed query, an unsupported OS). Neither path needs
+/// to exist: the closest existing parent is used.
+///
+/// Linux compares `st_dev`; Windows compares volume GUIDs. `Some(false)` only means "different
+/// device id": two partitions or subvolumes of one physical disk still differ. Never panics
+/// and never starts a process.
+pub fn same_device(a: &Path, b: &Path) -> Option<bool> {
+    #[cfg(target_os = "linux")]
+    return Some(linux::device_id(a)? == linux::device_id(b)?);
+    #[cfg(windows)]
+    return Some(windows::volume_of(a)? == windows::volume_of(b)?);
+    #[cfg(not(any(target_os = "linux", windows)))]
+    {
+        let _ = (a, b);
+        None
+    }
+}
+
 /// Sets the priority of the calling thread. Windows: background mode (lowers CPU and, per
 /// the docs' wording, resource scheduling priorities). Linux: nice plus I/O priority.
 /// Other systems: does nothing and succeeds.
@@ -208,6 +248,57 @@ mod tests {
         })
         .join()
         .unwrap();
+    }
+
+    #[test]
+    fn sequential_open_reads_like_a_plain_open_and_fails_like_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.bin");
+        std::fs::write(&file, b"hello").unwrap();
+        let mut got = String::new();
+        io::Read::read_to_string(&mut open_sequential(&file).unwrap(), &mut got).unwrap();
+        assert_eq!(got, "hello");
+        let missing = dir.path().join("missing");
+        let err = open_sequential(&missing).unwrap_err();
+        assert_eq!(err.kind(), File::open(&missing).unwrap_err().kind());
+    }
+
+    #[test]
+    fn a_failing_hint_falls_back_to_a_plain_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.bin");
+        std::fs::write(&file, b"x").unwrap();
+        let f = open_hinted(&file, |_| Err(io::Error::other("no hint")));
+        assert!(f.is_ok());
+        let f = open_hinted(&dir.path().join("missing"), |_| {
+            Err(io::Error::other("no hint"))
+        });
+        assert_eq!(f.unwrap_err().kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn same_device_agrees_with_itself_and_never_panics() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a");
+        let b = dir.path().join("sub").join("not-yet-there.zip");
+        std::fs::write(&a, b"x").unwrap();
+        #[cfg(any(target_os = "linux", windows))]
+        {
+            assert_eq!(same_device(&a, &a), Some(true));
+            assert_eq!(same_device(&a, &b), Some(true));
+            assert_eq!(same_device(&a, dir.path()), Some(true));
+        }
+        for (x, y) in [
+            (Path::new(""), Path::new(".")),
+            (Path::new("relative/missing"), a.as_path()),
+        ] {
+            let _ = same_device(x, y);
+        }
+        #[cfg(target_os = "linux")]
+        if Path::new("/proc").exists() {
+            // /proc is its own file system, so it cannot share a device with a temp dir.
+            assert_eq!(same_device(&a, Path::new("/proc")), Some(false));
+        }
     }
 
     #[test]

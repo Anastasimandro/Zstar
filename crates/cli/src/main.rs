@@ -6,11 +6,12 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use lexopt::prelude::*;
 use zstar_core::{
-    DriveKind, EntryKind, Error, Format, LimitKind, Options, Password, Priority, Profile, ZipMethod,
+    DriveKind, EntryKind, Error, Format, LimitKind, Options, Password, Priority, Profile, Stats,
+    StatsSnapshot, ZipMethod,
 };
 
 /// Release builds set `ZSTAR_VERSION` (see `.github/workflows/release.yml`) so the binary
@@ -41,6 +42,8 @@ COMMON OPTIONS:
         --password-file <FILE>  read the zip/7z password from the first line of FILE
                            (- = stdin). Without it the ZSTAR_PASSWORD variable is used.
                            There is no --password flag: it would show up in `ps`.
+        --stats            after compress or extract, print a `key: value` block of timings
+                           (reading, writing, waiting, MiB/s) to stderr. Off by default.
     -h, --help             show this help
     -V, --version          show the version
 
@@ -90,6 +93,8 @@ struct Cli {
     opts: Options,
     /// `--drive` was given, so the OS is not asked.
     drive_given: bool,
+    /// `--stats`: print the timing block after the operation.
+    stats: bool,
 }
 
 fn parse_size(s: &str) -> Result<u64, String> {
@@ -134,6 +139,7 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Cli>, String
     let mut format = None;
     let mut config: Option<PathBuf> = None;
     let mut drive_given = false;
+    let mut stats = false;
     let e = |e: lexopt::Error| e.to_string();
     let args: Vec<OsString> = args.into_iter().collect();
     // Flags override the file, so the file is read first: find --config before parsing.
@@ -178,6 +184,7 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Cli>, String
                     .ok_or(format!("unknown drive '{v}' (hdd, ssd)"))?;
                 drive_given = true;
             }
+            Long("stats") => stats = true,
             Short('f') | Long("force") => opts.overwrite = true,
             Short('l') | Long("level") => {
                 opts.level = Some(p.value().map_err(e)?.parse().map_err(e)?)
@@ -266,10 +273,14 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Cli>, String
         Some(other) => return Err(format!("unknown command '{other}'")),
         None => return Err("missing command".into()),
     };
+    if stats && !matches!(cmd, Cmd::Compress { .. } | Cmd::Extract { .. }) {
+        return Err("--stats applies to compress and extract".into());
+    }
     Ok(Some(Cli {
         cmd,
         opts,
         drive_given,
+        stats,
     }))
 }
 
@@ -349,6 +360,90 @@ fn detect_drive<'a>(paths: impl IntoIterator<Item = &'a Path>) -> DriveKind {
     ))
 }
 
+/// What `--stats` prints besides the library's counters.
+struct Report<'a> {
+    operation: &'a str,
+    format: Option<&'a str>,
+    profile: Profile,
+    drive: DriveKind,
+    drive_given: bool,
+    same_device: Option<bool>,
+    wall: Duration,
+}
+
+/// `Some(true)` only when every input is on the same device as `output`; `Some(false)` as
+/// soon as one is not; `None` when nothing is known to differ but something is not sure.
+fn same_device_all<'a>(output: &Path, inputs: impl IntoIterator<Item = &'a Path>) -> Option<bool> {
+    let mut all = Some(true);
+    for input in inputs {
+        match zstar_sys::same_device(input, output) {
+            Some(false) => return Some(false),
+            Some(true) => {}
+            None => all = None,
+        }
+    }
+    all
+}
+
+/// The `--stats` block: one `key: value` per line, keys never change, durations in
+/// milliseconds with three decimals. `codec_cpu_ms` is `n/a` unless the multi-threaded gzip
+/// path ran. See the docs of `zstar_core::StatsSnapshot` for what each number covers.
+fn stats_block(r: &Report<'_>, s: &StatsSnapshot) -> String {
+    let ms = |d: Duration| format!("{:.3}", d.as_secs_f64() * 1e3);
+    let compress = r.operation == "compress";
+    // The uncompressed side: what was read from the files, or what was written to them.
+    let plain = if compress {
+        s.read_bytes
+    } else {
+        s.write_bytes
+    };
+    let secs = r.wall.as_secs_f64();
+    let rate = if secs > 0.0 {
+        plain as f64 / (1 << 20) as f64 / secs
+    } else {
+        0.0
+    };
+    let yes_no = match r.same_device {
+        Some(true) => "yes",
+        Some(false) => "no",
+        None => "unknown",
+    };
+    let codec = if s.codec_cpu.is_zero() {
+        "n/a".to_owned()
+    } else {
+        ms(s.codec_cpu)
+    };
+    let mut out = String::from("stats_version: 1\n");
+    let mut line = |k: &str, v: String| {
+        out.push_str(k);
+        out.push_str(": ");
+        out.push_str(&v);
+        out.push('\n');
+    };
+    line("operation", r.operation.into());
+    line("format", r.format.unwrap_or("detected").into());
+    line("profile", r.profile.name().into());
+    line("drive_kind", r.drive.name().into());
+    line(
+        "drive_source",
+        if r.drive_given { "given" } else { "detected" }.into(),
+    );
+    line("same_device", yes_no.into());
+    line("threads_pool", s.threads_pool.max(1).to_string());
+    line("threads_start", s.threads_start.max(1).to_string());
+    line("wall_ms", ms(r.wall));
+    line("read_ms", ms(s.read));
+    line("write_ms", ms(s.write));
+    line("codec_cpu_ms", codec);
+    line("other_ms", ms(s.other()));
+    line("parked_ms", ms(s.parked));
+    line("bytes_in", s.read_bytes.to_string());
+    line("bytes_out", s.write_bytes.to_string());
+    line("throughput_mib_s", format!("{rate:.1}"));
+    line("throughput_basis", "uncompressed".into());
+    out
+}
+
 fn run(mut cli: Cli) -> Result<(), Error> {
     if let Cmd::DriveInfo { path } = &cli.cmd {
         let start = Instant::now();
@@ -381,6 +476,11 @@ fn run(mut cli: Cli) -> Result<(), Error> {
         // Failing only means the thread keeps its priority.
         let _ = zstar_sys::set_current_thread_priority(p);
     }));
+    // A hint that cannot be given only means a plain open.
+    cli.opts.open_hook = Some(Arc::new(zstar_sys::open_sequential));
+    if cli.stats {
+        cli.opts.stats = Some(Stats::new());
+    }
     let ctrlc_token = cli.opts.control.clone();
     // Failing to install the handler only costs graceful Ctrl-C, so it is not an error.
     let _ = ctrlc::set_handler(move || ctrlc_token.cancel());
@@ -408,9 +508,26 @@ fn run(mut cli: Cli) -> Result<(), Error> {
                         "cannot tell the format from the file name; use --format".into(),
                     )
                 })?;
+            let same = cli
+                .stats
+                .then(|| same_device_all(&archive, inputs.iter().map(PathBuf::as_path)));
+            let began = Instant::now();
             let r = zstar_core::create_file(format, &inputs, &archive, &cli.opts);
+            let wall = began.elapsed();
             clear();
             r?;
+            if let (Some(same_device), Some(snap)) = (same, cli.opts.stats_snapshot()) {
+                let report = Report {
+                    operation: "compress",
+                    format: Some(format.name()),
+                    profile: cli.opts.profile,
+                    drive: cli.opts.drive,
+                    drive_given: cli.drive_given,
+                    same_device,
+                    wall,
+                };
+                eprint!("{}", stats_block(&report, &snap));
+            }
             eprintln!(
                 "created {} ({}) in {:.2?}",
                 archive.display(),
@@ -419,9 +536,26 @@ fn run(mut cli: Cli) -> Result<(), Error> {
             );
         }
         Cmd::Extract { archive, output } => {
+            let same = cli
+                .stats
+                .then(|| same_device_all(&output, [archive.as_path()]));
+            let began = Instant::now();
             let r = zstar_core::extract_file(&archive, &output, &cli.opts);
+            let wall = began.elapsed();
             clear();
             let s = r?;
+            if let (Some(same_device), Some(snap)) = (same, cli.opts.stats_snapshot()) {
+                let report = Report {
+                    operation: "extract",
+                    format: None,
+                    profile: cli.opts.profile,
+                    drive: cli.opts.drive,
+                    drive_given: cli.drive_given,
+                    same_device,
+                    wall,
+                };
+                eprint!("{}", stats_block(&report, &snap));
+            }
             eprintln!(
                 "extracted {} files, {} dirs, {} symlinks, {:.1} MiB in {:.2?}",
                 s.files,

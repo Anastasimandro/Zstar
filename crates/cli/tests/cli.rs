@@ -156,3 +156,105 @@ fn drive_detection_does_not_break_operations() {
     assert!(o.status.success(), "{}", stderr(&o));
     assert_eq!(fs::read_to_string(cwd.join("dest/a.txt")).unwrap(), "alpha");
 }
+
+/// Parses a `--stats` block into its keys and values, failing on any line that is not
+/// `key: value`.
+fn parse_stats(text: &str) -> Vec<(String, String)> {
+    text.lines()
+        .map(|l| {
+            let (k, v) = l
+                .split_once(": ")
+                .unwrap_or_else(|| panic!("bad line {l:?}"));
+            (k.to_owned(), v.to_owned())
+        })
+        .collect()
+}
+
+fn stats_value<'a>(block: &'a [(String, String)], key: &str) -> &'a str {
+    &block.iter().find(|(k, _)| k == key).unwrap().1
+}
+
+const STATS_KEYS: [&str; 19] = [
+    "stats_version",
+    "operation",
+    "format",
+    "profile",
+    "drive_kind",
+    "drive_source",
+    "same_device",
+    "threads_pool",
+    "threads_start",
+    "wall_ms",
+    "read_ms",
+    "write_ms",
+    "codec_cpu_ms",
+    "other_ms",
+    "parked_ms",
+    "bytes_in",
+    "bytes_out",
+    "throughput_mib_s",
+    "throughput_basis",
+];
+
+#[test]
+fn stats_block_is_stable_parses_and_is_absent_without_the_flag() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join("proj")).unwrap();
+    fs::write(cwd.join("proj/a.txt"), "alpha".repeat(10_000)).unwrap();
+
+    let o = zstar(&["compress", "-j", "2", "plain.tar.gz", "proj"], cwd);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert!(!stderr(&o).contains("stats_version"), "{}", stderr(&o));
+
+    let o = zstar(
+        &["compress", "-j", "2", "--stats", "timed.tar.gz", "proj"],
+        cwd,
+    );
+    assert!(o.status.success(), "{}", stderr(&o));
+    let err = stderr(&o);
+    let block = err
+        .lines()
+        .skip_while(|l| !l.starts_with("stats_version"))
+        .take(STATS_KEYS.len())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let block = parse_stats(&block);
+    let keys: Vec<&str> = block.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(keys, STATS_KEYS);
+    assert_eq!(stats_value(&block, "operation"), "compress");
+    assert_eq!(stats_value(&block, "format"), "tar.gz");
+    assert_eq!(stats_value(&block, "bytes_in"), "50000");
+    assert_eq!(stats_value(&block, "same_device"), "yes");
+    assert_eq!(stats_value(&block, "drive_source"), "detected");
+    for key in ["wall_ms", "read_ms", "write_ms", "other_ms", "parked_ms"] {
+        stats_value(&block, key).parse::<f64>().unwrap();
+    }
+    // The flag only reports: the archive is the same byte for byte.
+    assert_eq!(
+        fs::read(cwd.join("plain.tar.gz")).unwrap(),
+        fs::read(cwd.join("timed.tar.gz")).unwrap()
+    );
+
+    let o = zstar(&["extract", "--stats", "-o", "dest", "timed.tar.gz"], cwd);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let err = stderr(&o);
+    let lines = err
+        .lines()
+        .skip_while(|l| !l.starts_with("stats_version"))
+        .take(STATS_KEYS.len())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let block = parse_stats(&lines);
+    assert_eq!(stats_value(&block, "operation"), "extract");
+    assert_eq!(stats_value(&block, "bytes_out"), "50000");
+    assert_eq!(stats_value(&block, "format"), "detected");
+}
+
+#[test]
+fn stats_is_refused_where_it_means_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let o = zstar(&["list", "--stats", "x.zip"], tmp.path());
+    assert!(!o.status.success());
+    assert!(stderr(&o).contains("--stats applies to compress and extract"));
+}

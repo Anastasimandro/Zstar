@@ -23,6 +23,30 @@ The format is chosen from the output name when creating and detected from the fi
 contents when reading. Run `zstar --help` for the options, including the decompression-bomb
 limits.
 
+## Measuring with `--stats`
+
+`zstar compress --stats ...` and `zstar extract --stats ...` print a `key: value` block on
+stderr when the operation succeeds. It is off by default and costs one branch per call when
+off. Besides wall time, bytes and throughput it says where thread time went and what the engine
+asked of the file system:
+
+- `busy_ms`, `wait_input_ms`, `wait_output_ms`, `wait_workers_ms`, `finish_ms` (plus
+  `parked_ms`): the time of every thread split into exclusive parts, in thread-milliseconds, so
+  with several threads they add up to more than `wall_ms`. `dominant_stage` and
+  `dominant_share_pct` name the largest part: `cpu`, `wait_input`, `wait_output`,
+  `wait_workers`, `finish` or `parked`.
+- `queue_avg`, `queue_max`: items handed to the workers per gzip wave or zip batch (`n/a` where
+  there is no queue).
+- `fs_opens`, `fs_stats`, `fs_mkdirs`, `fs_renames`, `files`, `files_per_s`, `latency_p50_ms`,
+  `latency_p95_ms` (per file, from start to done).
+- `write_completion: buffered`: writes and `finish_ms` hand data to the operating system. Zstar
+  never calls `fsync`, so no number here is the time until the data is on the disk.
+
+Every key is defined in the module docs of
+[`crates/core/src/stats.rs`](crates/core/src/stats.rs); the way to run measurements is in
+[docs/reports/io-measurement.md](docs/reports/io-measurement.md) and what the counters cost in
+[docs/reports/stats-overhead-v2.md](docs/reports/stats-overhead-v2.md).
+
 ## Build
 
 ```

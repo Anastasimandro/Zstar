@@ -86,6 +86,8 @@ mod imp {
 
     use super::*;
     use crate::error::{Error, Result};
+    #[allow(unused_imports)]
+    use crate::stats::{self, Class};
 
     #[cfg(any(
         feature = "gzip",
@@ -256,6 +258,9 @@ mod imp {
             // encoders fix their thread count when they start.
             let threads = workers.active();
             let _ = (threads, level);
+            // The encoder's last bytes are written when it is finished: that is `finish` time.
+            #[allow(unused_variables)]
+            let stats = workers.stats.clone();
             match self {
                 #[cfg(feature = "gzip")]
                 Codec::Gzip if workers.pool > 1 => {
@@ -269,7 +274,7 @@ mod imp {
                     let mut enc =
                         flate2::write::GzEncoder::new(out, flate2::Compression::new(level as u32));
                     let value = f(&mut enc)?;
-                    enc.finish()?;
+                    stats::timed(stats.as_ref(), Class::Finish, || enc.finish())?;
                     Ok(value)
                 }
                 #[cfg(feature = "zstd")]
@@ -280,7 +285,7 @@ mod imp {
                         enc.multithread(threads as u32)?;
                     }
                     let value = f(&mut enc)?;
-                    enc.finish()?;
+                    stats::timed(stats.as_ref(), Class::Finish, || enc.finish())?;
                     Ok(value)
                 }
                 #[cfg(feature = "bzip2")]
@@ -288,7 +293,7 @@ mod imp {
                     let mut enc =
                         bzip2::write::BzEncoder::new(out, bzip2::Compression::new(level as u32));
                     let value = f(&mut enc)?;
-                    enc.finish()?;
+                    stats::timed(stats.as_ref(), Class::Finish, || enc.finish())?;
                     Ok(value)
                 }
                 #[cfg(feature = "xz")]
@@ -301,12 +306,12 @@ mod imp {
                         options.set_block_size(std::num::NonZeroU64::new(block));
                         let mut enc = lzma_rust2::XzWriterMt::new(out, options, threads as u32)?;
                         let value = f(&mut enc)?;
-                        enc.finish()?;
+                        stats::timed(stats.as_ref(), Class::Finish, || enc.finish())?;
                         Ok(value)
                     } else {
                         let mut enc = lzma_rust2::XzWriter::new(out, options)?;
                         let value = f(&mut enc)?;
-                        enc.finish()?;
+                        stats::timed(stats.as_ref(), Class::Finish, || enc.finish())?;
                         Ok(value)
                     }
                 }
@@ -319,7 +324,8 @@ mod imp {
                         .content_checksum(true);
                     let mut enc = FrameEncoder::with_frame_info(info, out);
                     let value = f(&mut enc)?;
-                    enc.finish().map_err(io::Error::from)?;
+                    stats::timed(stats.as_ref(), Class::Finish, || enc.finish())
+                        .map_err(io::Error::from)?;
                     Ok(value)
                 }
                 #[cfg(feature = "brotli")]
@@ -334,7 +340,10 @@ mod imp {
                     let mut enc =
                         brotli::CompressorWriter::new(watched, 64 * 1024, level as u32, 22);
                     let value = f(&mut enc)?;
-                    let _ = enc.into_inner(); // closes the stream; errors are caught by `failed`
+                    // Closes the stream; errors are caught by `failed`.
+                    stats::timed(stats.as_ref(), Class::Finish, || {
+                        let _ = enc.into_inner();
+                    });
                     if failed.get() {
                         return Err(Error::Io(io::Error::other(
                             "writing the brotli stream failed while closing it",

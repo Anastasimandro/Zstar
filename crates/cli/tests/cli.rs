@@ -174,7 +174,7 @@ fn stats_value<'a>(block: &'a [(String, String)], key: &str) -> &'a str {
     &block.iter().find(|(k, _)| k == key).unwrap().1
 }
 
-const STATS_KEYS: [&str; 19] = [
+const STATS_KEYS: [&str; 37] = [
     "stats_version",
     "operation",
     "format",
@@ -194,6 +194,24 @@ const STATS_KEYS: [&str; 19] = [
     "bytes_out",
     "throughput_mib_s",
     "throughput_basis",
+    "busy_ms",
+    "wait_input_ms",
+    "wait_output_ms",
+    "wait_workers_ms",
+    "finish_ms",
+    "dominant_stage",
+    "dominant_share_pct",
+    "queue_avg",
+    "queue_max",
+    "fs_opens",
+    "fs_stats",
+    "fs_mkdirs",
+    "fs_renames",
+    "files",
+    "files_per_s",
+    "latency_p50_ms",
+    "latency_p95_ms",
+    "write_completion",
 ];
 
 #[test]

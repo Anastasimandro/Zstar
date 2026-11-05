@@ -20,6 +20,7 @@ use std::time::Instant;
 use flate2::{Compress, Compression, FlushCompress, Status};
 
 use crate::control::Workers;
+use crate::stats::{self, Class};
 
 /// Uncompressed bytes per block. Small enough to keep memory low, large enough that the sync
 /// flush marker between blocks (5 bytes) is lost in the noise.
@@ -85,49 +86,63 @@ impl<W: Write> ParGz<W> {
         for (i, o) in self.outs.iter_mut().take(n).enumerate() {
             jobs[i % active].push((i, o));
         }
-        let crcs: Vec<io::Result<crc32fast::Hasher>> = thread::scope(|scope| {
-            let handles: Vec<_> = jobs
-                .into_iter()
-                .zip(self.comps.iter_mut())
-                .map(|(items, comp)| {
-                    let (bufs, dict) = (bufs, &dict);
-                    scope.spawn(move || {
-                        workers.sync_priority();
-                        let started = workers.stats.as_ref().map(|_| Instant::now());
-                        let done = items
-                            .into_iter()
-                            .map(|(i, o)| {
-                                deflate_block(comp, dict(i), &bufs[i], final_idx == Some(i), o)?;
-                                let mut h = crc32fast::Hasher::new();
-                                h.update(&bufs[i]);
-                                Ok((i, h))
+        if let Some(s) = &workers.stats {
+            s.note_queue(n);
+        }
+        // The calling thread only waits while the wave is compressed: `wait_workers` time.
+        let crcs: Vec<io::Result<crc32fast::Hasher>> =
+            stats::timed(workers.stats.as_ref(), Class::Workers, || {
+                thread::scope(|scope| {
+                    let handles: Vec<_> = jobs
+                        .into_iter()
+                        .zip(self.comps.iter_mut())
+                        .map(|(items, comp)| {
+                            let (bufs, dict) = (bufs, &dict);
+                            scope.spawn(move || {
+                                let _lane = stats::lane(workers.stats.as_ref());
+                                workers.sync_priority();
+                                let started = workers.stats.as_ref().map(|_| Instant::now());
+                                let done = items
+                                    .into_iter()
+                                    .map(|(i, o)| {
+                                        deflate_block(
+                                            comp,
+                                            dict(i),
+                                            &bufs[i],
+                                            final_idx == Some(i),
+                                            o,
+                                        )?;
+                                        let mut h = crc32fast::Hasher::new();
+                                        h.update(&bufs[i]);
+                                        Ok((i, h))
+                                    })
+                                    .collect::<Vec<io::Result<(usize, crc32fast::Hasher)>>>();
+                                // One add per thread per wave, so the hot path stays free of atomics.
+                                if let (Some(stats), Some(t)) = (&workers.stats, started) {
+                                    stats.add_codec_cpu(t.elapsed());
+                                }
+                                done
                             })
-                            .collect::<Vec<io::Result<(usize, crc32fast::Hasher)>>>();
-                        // One add per thread per wave, so the hot path stays free of atomics.
-                        if let (Some(stats), Some(t)) = (&workers.stats, started) {
-                            stats.add_codec_cpu(t.elapsed());
+                        })
+                        .collect();
+                    let mut by_block: Vec<Option<io::Result<crc32fast::Hasher>>> =
+                        (0..n).map(|_| None).collect();
+                    for h in handles {
+                        for r in h.join().unwrap_or_else(|_| {
+                            vec![Err(io::Error::other("a compression thread panicked"))]
+                        }) {
+                            match r {
+                                Ok((i, hasher)) => by_block[i] = Some(Ok(hasher)),
+                                Err(e) => by_block[0] = Some(Err(e)),
+                            }
                         }
-                        done
-                    })
-                })
-                .collect();
-            let mut by_block: Vec<Option<io::Result<crc32fast::Hasher>>> =
-                (0..n).map(|_| None).collect();
-            for h in handles {
-                for r in h.join().unwrap_or_else(|_| {
-                    vec![Err(io::Error::other("a compression thread panicked"))]
-                }) {
-                    match r {
-                        Ok((i, hasher)) => by_block[i] = Some(Ok(hasher)),
-                        Err(e) => by_block[0] = Some(Err(e)),
                     }
-                }
-            }
-            by_block
-                .into_iter()
-                .map(|r| r.unwrap_or_else(|| Err(io::Error::other("missing block"))))
-                .collect()
-        });
+                    by_block
+                        .into_iter()
+                        .map(|r| r.unwrap_or_else(|| Err(io::Error::other("missing block"))))
+                        .collect()
+                })
+            });
 
         for (i, h) in crcs.into_iter().enumerate() {
             let h = h?;
@@ -146,10 +161,15 @@ impl<W: Write> ParGz<W> {
     pub(crate) fn finish(mut self) -> io::Result<W> {
         self.flush_wave(true)?;
         let crc = std::mem::replace(&mut self.crc, crc32fast::Hasher::new()).finalize();
-        self.out.write_all(&crc.to_le_bytes())?;
-        // The gzip size field is the length modulo 2^32.
-        self.out.write_all(&(self.total as u32).to_le_bytes())?;
-        self.out.flush()?;
+        let size = (self.total as u32).to_le_bytes();
+        let out = &mut self.out;
+        // The trailer and the last flush: handed to the OS, not synced.
+        stats::timed(self.workers.stats.as_ref(), Class::Finish, || {
+            out.write_all(&crc.to_le_bytes())?;
+            // The gzip size field is the length modulo 2^32.
+            out.write_all(&size)?;
+            out.flush()
+        })?;
         Ok(self.out)
     }
 }

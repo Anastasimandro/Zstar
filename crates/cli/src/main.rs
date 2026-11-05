@@ -393,9 +393,12 @@ fn same_device_all<'a>(output: &Path, inputs: impl IntoIterator<Item = &'a Path>
     all
 }
 
-/// The `--stats` block: one `key: value` per line, keys never change, durations in
-/// milliseconds with three decimals. `codec_cpu_ms` is `n/a` unless the multi-threaded gzip
-/// path ran. See the docs of `zstar_core::StatsSnapshot` for what each number covers.
+/// The `--stats` block: one `key: value` per line, durations in milliseconds with three
+/// decimals. Version 2 only appends keys to version 1, so existing keys keep their meaning
+/// and position. `codec_cpu_ms` is `n/a` unless the multi-threaded gzip path ran, and the
+/// queue and latency keys are `n/a` for formats that have none. See the docs of
+/// `zstar_core::StatsSnapshot` and the module docs of its `stats` module for what each number
+/// covers.
 fn stats_block(r: &Report<'_>, s: &StatsSnapshot) -> String {
     let ms = |d: Duration| format!("{:.3}", d.as_secs_f64() * 1e3);
     let compress = r.operation == "compress";
@@ -421,7 +424,7 @@ fn stats_block(r: &Report<'_>, s: &StatsSnapshot) -> String {
     } else {
         ms(s.codec_cpu)
     };
-    let mut out = String::from("stats_version: 1\n");
+    let mut out = String::from("stats_version: 2\n");
     let mut line = |k: &str, v: String| {
         out.push_str(k);
         out.push_str(": ");
@@ -449,6 +452,51 @@ fn stats_block(r: &Report<'_>, s: &StatsSnapshot) -> String {
     line("bytes_out", s.write_bytes.to_string());
     line("throughput_mib_s", format!("{rate:.1}"));
     line("throughput_basis", "uncompressed".into());
+    // Version 2: where the thread time went, counts, latency. Thread-seconds, so the four
+    // `*_ms` parts below can exceed `wall_ms` when several threads work.
+    let na = || "n/a".to_owned();
+    line("busy_ms", ms(s.busy));
+    line("wait_input_ms", ms(s.wait_input));
+    line("wait_output_ms", ms(s.wait_output));
+    line("wait_workers_ms", ms(s.wait_workers));
+    line("finish_ms", ms(s.finish));
+    match s.dominant() {
+        Some((stage, share)) => {
+            line("dominant_stage", stage.name().into());
+            line("dominant_share_pct", format!("{:.1}", share * 100.0));
+        }
+        None => {
+            line("dominant_stage", na());
+            line("dominant_share_pct", na());
+        }
+    }
+    line(
+        "queue_avg",
+        s.queue_avg().map_or_else(na, |v| format!("{v:.1}")),
+    );
+    line(
+        "queue_max",
+        if s.queue_samples > 0 {
+            s.queue_max.to_string()
+        } else {
+            na()
+        },
+    );
+    line("fs_opens", s.opens.to_string());
+    line("fs_stats", s.stat_calls.to_string());
+    line("fs_mkdirs", s.mkdirs.to_string());
+    line("fs_renames", s.renames.to_string());
+    line("files", s.files.to_string());
+    let files_per_s = if secs > 0.0 {
+        s.files as f64 / secs
+    } else {
+        0.0
+    };
+    line("files_per_s", format!("{files_per_s:.1}"));
+    line("latency_p50_ms", s.latency_p50.map_or_else(na, ms));
+    line("latency_p95_ms", s.latency_p95.map_or_else(na, ms));
+    // Writes and closes hand data to the OS; nothing here waits for the disk (no fsync).
+    line("write_completion", "buffered".into());
     out
 }
 

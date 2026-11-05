@@ -270,10 +270,14 @@ impl Options {
     /// Opens `path` for reading through [`open_hook`](Self::open_hook), with its reads timed
     /// when stats are on.
     pub(crate) fn open_source(&self, path: &Path) -> io::Result<Source> {
-        let file = match &self.open_hook {
-            Some(hook) => hook(path).or_else(|_| File::open(path))?,
-            None => File::open(path)?,
-        };
+        let file = crate::stats::fs(
+            self.stats.as_ref(),
+            crate::stats::FsOp::OpenSrc,
+            || match &self.open_hook {
+                Some(hook) => hook(path).or_else(|_| File::open(path)),
+                None => File::open(path),
+            },
+        )?;
         Ok(Timed::new(file, self.stats.clone()))
     }
 

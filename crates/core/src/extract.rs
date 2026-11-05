@@ -24,6 +24,7 @@ use crate::error::{Error, LimitKind, Result};
 use crate::options::Options;
 use crate::path::sanitize;
 use crate::progress::Tracker;
+use crate::stats::FsOp;
 
 /// What an extraction did.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -86,7 +87,9 @@ impl<'a> Session<'a> {
         bytes_total: Option<u64>,
         entries_total: Option<u64>,
     ) -> Result<Self> {
-        fs::create_dir_all(dest)?;
+        crate::stats::fs(opts.stats.as_ref(), FsOp::MkdirOut, || {
+            fs::create_dir_all(dest)
+        })?;
         Ok(Session {
             root: fs::canonicalize(dest)?,
             opts,
@@ -153,9 +156,16 @@ impl<'a> Session<'a> {
         Ok(())
     }
 
+    /// `create_dir_all`, counted and timed as output work.
+    fn mkdirs(&self, path: &Path) -> io::Result<()> {
+        crate::stats::fs(self.opts.stats.as_ref(), FsOp::MkdirOut, || {
+            fs::create_dir_all(path)
+        })
+    }
+
     pub(crate) fn make_dir(&self, rel: &Path) -> Result<()> {
         if !rel.as_os_str().is_empty() {
-            fs::create_dir_all(self.root.join(rel))?;
+            self.mkdirs(&self.root.join(rel))?;
             self.dirs.fetch_add(1, Ordering::Relaxed);
         }
         Ok(())
@@ -179,26 +189,35 @@ impl<'a> Session<'a> {
                 reason: "empty file name",
             });
         }
-        let dest = self.root.join(rel);
-        if let Some(parent) = dest.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        self.check_destination(&dest)?;
+        let stats = self.opts.stats.as_ref();
+        crate::stats::time_file(stats, || {
+            let dest = self.root.join(rel);
+            if let Some(parent) = dest.parent() {
+                self.mkdirs(parent)?;
+            }
+            self.check_destination(&dest)?;
 
-        let part = part_path(&dest);
-        let written = self.copy_to_part(&part, name, src, mode, mtime, buf);
-        let renamed = written.and_then(|()| fs::rename(&part, &dest).map_err(Error::from));
-        if renamed.is_err() {
-            let _ = fs::remove_file(&part);
-        }
-        renamed?;
-        self.files.fetch_add(1, Ordering::Relaxed);
-        self.tracker.entry_done(name);
-        Ok(())
+            let part = part_path(&dest);
+            let written = self.copy_to_part(&part, name, src, mode, mtime, buf);
+            let renamed = written.and_then(|()| {
+                crate::stats::fs(stats, FsOp::RenameOut, || fs::rename(&part, &dest))
+                    .map_err(Error::from)
+            });
+            if renamed.is_err() {
+                let _ = fs::remove_file(&part);
+            }
+            renamed?;
+            self.files.fetch_add(1, Ordering::Relaxed);
+            self.tracker.entry_done(name);
+            Ok(())
+        })
     }
 
     fn check_destination(&self, dest: &Path) -> Result<()> {
-        match fs::symlink_metadata(dest) {
+        let meta = crate::stats::fs(self.opts.stats.as_ref(), FsOp::StatOut, || {
+            fs::symlink_metadata(dest)
+        });
+        match meta {
             Ok(m) if m.is_dir() || !self.opts.overwrite => Err(Error::AlreadyExists(dest.into())),
             Ok(_) => Ok(()),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -215,7 +234,9 @@ impl<'a> Session<'a> {
         mtime: Option<SystemTime>,
         buf: &mut [u8],
     ) -> Result<()> {
-        let mut file = File::create(part)?;
+        let mut file = crate::stats::fs(self.opts.stats.as_ref(), FsOp::CreateOut, || {
+            File::create(part)
+        })?;
         loop {
             self.check_stop()?;
             let n = match src.read(buf) {
@@ -240,6 +261,12 @@ impl<'a> Session<'a> {
         if let Some(t) = mtime {
             let _ = file.set_modified(t); // a cosmetic failure must not fail the extraction
         }
+        // Closing hands the data to the OS (no fsync); on some systems it is where we wait.
+        crate::stats::timed(
+            self.opts.stats.as_ref(),
+            crate::stats::Class::Finish,
+            || drop(file),
+        );
         Ok(())
     }
 
@@ -256,7 +283,7 @@ impl<'a> Session<'a> {
             });
         }
         if let Some(parent) = link.parent() {
-            fs::create_dir_all(parent)?;
+            self.mkdirs(parent)?;
         }
         self.check_destination(&link)?;
         if fs::symlink_metadata(&link).is_ok() {
@@ -346,7 +373,7 @@ impl<'a> Session<'a> {
         }
         let path = self.root.join(&link.rel);
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
+            self.mkdirs(parent)?;
         }
         self.check_destination(&path)?;
         if fs::symlink_metadata(&path).is_ok() {

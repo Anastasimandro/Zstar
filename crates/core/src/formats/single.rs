@@ -164,21 +164,23 @@ impl ArchiveFormat for SingleFormat {
         let src = &sources[0];
         let tracker = Tracker::new(opts, Some(src.size), Some(1));
         let mut file = opts.open_source(&src.path)?;
-        self.codec
-            .with_writer(out, level, opts.workers(), |writer| {
-                let mut buf = vec![0u8; opts.io_buffer()];
-                loop {
-                    opts.check_cancel()?;
-                    let n = read_chunk(&mut file, &mut buf)?;
-                    if n == 0 {
-                        break;
+        crate::stats::time_file(opts.stats.as_ref(), || {
+            self.codec
+                .with_writer(out, level, opts.workers(), |writer| {
+                    let mut buf = vec![0u8; opts.io_buffer()];
+                    loop {
+                        opts.check_cancel()?;
+                        let n = read_chunk(&mut file, &mut buf)?;
+                        if n == 0 {
+                            break;
+                        }
+                        writer.write_all(&buf[..n])?;
+                        tracker.add_bytes(n as u64, &src.name);
                     }
-                    writer.write_all(&buf[..n])?;
-                    tracker.add_bytes(n as u64, &src.name);
-                }
-                tracker.entry_done(&src.name);
-                Ok(())
-            })
+                    tracker.entry_done(&src.name);
+                    Ok(())
+                })
+        })
     }
 }
 

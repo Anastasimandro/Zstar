@@ -168,6 +168,7 @@ impl Control {
     fn add_parked(&self, since: Instant) {
         let ns = u64::try_from(since.elapsed().as_nanos()).unwrap_or(u64::MAX);
         self.0.parked_ns.fetch_add(ns, Relaxed);
+        crate::stats::note_parked(ns);
     }
 
     /// Accounts for `bytes` just processed and sleeps if the throughput limit says so.

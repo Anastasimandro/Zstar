@@ -181,7 +181,11 @@ fn write_tar<W: Write>(w: W, sources: &[SourceEntry], opts: &Options) -> Result<
                     tracker: &tracker,
                     name: &s.name,
                 };
-                builder.append_data(&mut header, &s.name, reader)?;
+                crate::stats::time_file(opts.stats.as_ref(), || {
+                    builder
+                        .append_data(&mut header, &s.name, reader)
+                        .map_err(Error::from)
+                })?;
             }
             EntryKind::Dir => {
                 header.set_entry_type(EntryType::Directory);
@@ -203,8 +207,11 @@ fn write_tar<W: Write>(w: W, sources: &[SourceEntry], opts: &Options) -> Result<
         }
         tracker.entry_done(&s.name);
     }
-    let buffered = builder.into_inner()?;
-    buffered.into_inner().map_err(|e| Error::Io(e.into_error()))
+    // The tar trailer and the last buffered bytes: handed to the OS, not synced.
+    crate::stats::timed(opts.stats.as_ref(), crate::stats::Class::Finish, || {
+        let buffered = builder.into_inner()?;
+        buffered.into_inner().map_err(|e| Error::Io(e.into_error()))
+    })
 }
 
 impl ArchiveFormat for TarFormat {

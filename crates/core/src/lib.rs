@@ -58,7 +58,7 @@ pub use options::{Limits, OpenHook, Options, Password, Progress, ProgressFn, Zip
 pub use path::sanitize as sanitize_entry_name;
 pub use profile::{DriveKind, Profile, Settings, settings_for};
 pub use sources::{SourceEntry, collect_sources};
-pub use stats::{Stats, StatsSnapshot};
+pub use stats::{Stage, Stats, StatsSnapshot};
 
 /// Lists the entries of an archive, detecting its format first.
 ///
@@ -107,13 +107,26 @@ pub fn list_file(path: &Path, opts: &Options, visit: &mut dyn FnMut(EntryInfo)) 
 /// Extracts the archive at `path` into `dest`.
 pub fn extract_file(path: &Path, dest: &Path, opts: &Options) -> Result<Summary> {
     let opts = named_after(path, opts);
-    let mut input = opts.open_source(path)?;
-    stats::timed_op(opts.stats.as_ref(), || extract(&mut input, dest, &opts))
+    stats::timed_op(opts.stats.as_ref(), || {
+        let mut input = opts.open_source(path)?;
+        extract(&mut input, dest, &opts)
+    })
 }
 
 /// Archives `inputs` into a new file at `output`, written as `<output>.part` and renamed
 /// when complete. `output` itself is never archived, even when it lies inside an input.
 pub fn create_file(
+    format: Format,
+    inputs: &[PathBuf],
+    output: &Path,
+    opts: &Options,
+) -> Result<()> {
+    stats::timed_op(opts.stats.as_ref(), || {
+        create_file_inner(format, inputs, output, opts)
+    })
+}
+
+fn create_file_inner(
     format: Format,
     inputs: &[PathBuf],
     output: &Path,
@@ -136,15 +149,27 @@ pub fn create_file(
     };
     let part = extract::part_path(output);
     let part_abs = extract::part_path(&output_abs);
-    let sources = collect_sources(inputs, &[output_abs, part_abs])?;
+    let st = opts.stats.as_ref();
+    let sources = stats::timed(st, stats::Class::Input, || {
+        collect_sources(inputs, &[output_abs, part_abs])
+    })?;
+    // One metadata call per entry; listing directories is not counted (see the stats docs).
+    if let Some(s) = st {
+        s.count(stats::FsOp::StatSrc, sources.len() as u64);
+    }
 
-    let written = File::create(&part).map_err(Error::from).and_then(|file| {
-        let mut file = stats::Timed::new(file, opts.stats.clone());
-        stats::timed_op(opts.stats.as_ref(), || {
-            handler.create(&sources, &mut file, opts)
-        })
+    let written = stats::fs(st, stats::FsOp::CreateOut, || File::create(&part))
+        .map_err(Error::from)
+        .and_then(|file| {
+            let mut file = stats::Timed::new(file, opts.stats.clone());
+            handler.create(&sources, &mut file, opts)?;
+            // Closing is where the OS may make us wait; it hands the data over, no fsync.
+            stats::timed(st, stats::Class::Finish, || drop(file));
+            Ok(())
+        });
+    let renamed = written.and_then(|()| {
+        stats::fs(st, stats::FsOp::RenameOut, || fs::rename(&part, output)).map_err(Error::from)
     });
-    let renamed = written.and_then(|()| fs::rename(&part, output).map_err(Error::from));
     if renamed.is_err() {
         let _ = fs::remove_file(&part);
     }

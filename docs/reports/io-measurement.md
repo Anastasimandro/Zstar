@@ -40,7 +40,8 @@ there to measure it.
 
 ## What `--stats` prints
 
-A `key: value` block on stderr after a successful compress or extract. The keys never change.
+A `key: value` block on stderr after a successful compress or extract. `stats_version: 2` only
+appends keys to version 1: the old keys keep their meaning and their order.
 
 | key | meaning |
 | --- | --- |
@@ -56,8 +57,19 @@ A `key: value` block on stderr after a successful compress or extract. The keys 
 | `parked_ms` | time workers slept for the throughput limit or the thread limit, summed over threads |
 | `bytes_in`, `bytes_out` | bytes read from the source (compress) or archive (extract); bytes written to the archive or the files |
 | `throughput_mib_s` | uncompressed bytes (source for compress, extracted for extract) divided by `wall_ms` |
+| `busy_ms` | thread time spent on the thread's own work (compressing, decompressing, checksums, bookkeeping), summed over threads. It is what is left of a thread's time after the waits below |
+| `wait_input_ms` | thread time blocked getting input: reads, opening and stat-ing sources, waiting for the shared zip reader lock. Contains `read_ms` |
+| `wait_output_ms` | thread time blocked on output: writes, creating files and directories, destination checks. Contains `write_ms` except the writes made while finishing |
+| `wait_workers_ms` | a thread idle while it waits for the workers it handed a gzip wave, a zip batch or the zip extraction to |
+| `finish_ms` | closing files, renaming `.part` files and the final flush of an archive or stream. Hands data to the OS: **not** physical completion, no `fsync` |
+| `dominant_stage`, `dominant_share_pct` | the largest of `busy`, `wait_input`, `wait_output`, `wait_workers`, `finish`, `parked` (named `cpu`, `wait_input`, ...) and its share of their sum |
+| `queue_avg`, `queue_max` | items handed to workers per gzip wave or zip batch, sampled when it starts; `n/a` without a queue |
+| `fs_opens`, `fs_stats`, `fs_mkdirs`, `fs_renames` | file-system calls made (see `stats.rs` for exactly which); `fs_mkdirs` counts calls, not directories created |
+| `files`, `files_per_s` | regular files completed, and that over `wall_ms` |
+| `latency_p50_ms`, `latency_p95_ms` | per-file time from start to done; upper edge of a histogram bucket, up to 12.5% high; `n/a` when files are not handled one by one (7z creation) |
+| `write_completion` | always `buffered`: nothing waits for the disk |
 
-Reading the result: if `read_ms + write_ms` is close to `wall_ms`, the disk is the limit. If
+Start from `dominant_stage`. Reading the older keys: if `read_ms + write_ms` is close to `wall_ms`, the disk is the limit. If
 `other_ms` (one thread) or `codec_cpu_ms / threads_start` is close to `wall_ms`, the CPU is. If
 none of them add up to `wall_ms`, something is idle: that is the number Part A needs.
 

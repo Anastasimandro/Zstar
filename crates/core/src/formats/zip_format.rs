@@ -8,7 +8,7 @@ use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, PoisonError};
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 use zip::read::ZipFile;
 use zip::result::ZipResult;
@@ -23,6 +23,7 @@ use crate::formats::stream_len;
 use crate::options::{Options, ZipMethod};
 use crate::progress::Tracker;
 use crate::sources::SourceEntry;
+use crate::stats::{self, Class, Stats};
 use crate::timeconv::{Civil, civil_to_system, system_to_civil};
 
 const BUF: usize = 64 * 1024;
@@ -43,11 +44,15 @@ pub(crate) struct ZipFormat;
 struct Shared<'a, 'b> {
     inner: &'a Mutex<&'b mut (dyn ReadSeek + 'b)>,
     pos: u64,
+    stats: Option<Stats>,
 }
 
 impl<'a, 'b> Shared<'a, 'b> {
+    /// Waiting here is time a worker cannot read its input: it counts as `wait_input`.
     fn lock(&self) -> std::sync::MutexGuard<'a, &'b mut (dyn ReadSeek + 'b)> {
-        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+        stats::timed(self.stats.as_ref(), Class::Input, || {
+            self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+        })
     }
 }
 
@@ -78,12 +83,14 @@ type SharedReader<'a, 'b> = BufReader<Shared<'a, 'b>>;
 
 fn open<'a, 'b>(
     shared: &'a Mutex<&'b mut (dyn ReadSeek + 'b)>,
+    stats: Option<&Stats>,
 ) -> Result<ZipArchive<SharedReader<'a, 'b>>> {
     let reader = BufReader::with_capacity(
         BUF,
         Shared {
             inner: shared,
             pos: 0,
+            stats: stats.cloned(),
         },
     );
     Ok(ZipArchive::new(reader)?)
@@ -241,7 +248,7 @@ fn worker(
     workers: &Workers,
     index: usize,
 ) -> Result<()> {
-    let mut archive = open(shared)?;
+    let mut archive = open(shared, workers.stats.as_ref())?;
     let mut buf = vec![0u8; session.io_buffer()];
     loop {
         workers.checkpoint(
@@ -282,12 +289,21 @@ fn run_workers(
     if threads <= 1 {
         work(0);
     } else {
+        let mut main_done = None;
         std::thread::scope(|scope| {
             for index in 1..threads {
-                scope.spawn(move || work(index));
+                scope.spawn(move || {
+                    let _lane = stats::lane(workers.stats.as_ref());
+                    work(index)
+                });
             }
             work(0);
+            main_done = workers.stats.as_ref().map(|_| Instant::now());
         });
+        // From here to the end of the scope the calling thread only waited for the others.
+        if let (Some(since), Some(s)) = (main_done, workers.stats.as_ref()) {
+            s.add_since(Class::Workers, since);
+        }
     }
     match first_error
         .into_inner()
@@ -389,19 +405,23 @@ fn compress_small(
     tracker: &Tracker<'_>,
 ) -> Result<PreparedZipFile> {
     opts.check_cancel()?;
-    let mut data = Vec::with_capacity(s.size as usize);
-    opts.open_source(&s.path)?
-        .take(SMALL_FILE + 1)
-        .read_to_end(&mut data)?;
-    if data.len() as u64 > SMALL_FILE {
-        return Err(
-            io::Error::other(format!("{} grew while being archived", s.path.display())).into(),
-        );
-    }
-    let mut builder = ZipFileBuilder::new(&s.name, file_options(s, plan, None))?;
-    builder.write_all(&data)?;
-    tracker.add_bytes(data.len() as u64, &s.name);
-    Ok(builder.finish()?)
+    stats::time_file(opts.stats.as_ref(), || {
+        let mut data = Vec::with_capacity(s.size as usize);
+        opts.open_source(&s.path)?
+            .take(SMALL_FILE + 1)
+            .read_to_end(&mut data)?;
+        if data.len() as u64 > SMALL_FILE {
+            return Err(io::Error::other(format!(
+                "{} grew while being archived",
+                s.path.display()
+            ))
+            .into());
+        }
+        let mut builder = ZipFileBuilder::new(&s.name, file_options(s, plan, None))?;
+        builder.write_all(&data)?;
+        tracker.add_bytes(data.len() as u64, &s.name);
+        Ok(builder.finish()?)
+    })
 }
 
 struct Creator<'a, 'o> {
@@ -453,18 +473,25 @@ impl Creator<'_, '_> {
         let next = AtomicUsize::new(0);
         let (opts, plan, tracker) = (self.opts, self.plan, &self.tracker);
         let workers = opts.workers();
-        std::thread::scope(|scope| {
-            for _ in 0..threads.min(batch.len()) {
-                scope.spawn(|| {
-                    workers.sync_priority();
-                    loop {
-                        let i = next.fetch_add(1, Ordering::Relaxed);
-                        let Some(&s) = batch.get(i) else { break };
-                        let done = compress_small(s, plan, opts, tracker);
-                        *slots[i].lock().unwrap_or_else(PoisonError::into_inner) = Some(done);
-                    }
-                });
-            }
+        if let (Some(s), false) = (opts.stats.as_ref(), batch.is_empty()) {
+            s.note_queue(batch.len());
+        }
+        // The calling thread hands the batch out and waits: that is `wait_workers` time.
+        stats::timed(opts.stats.as_ref(), Class::Workers, || {
+            std::thread::scope(|scope| {
+                for _ in 0..threads.min(batch.len()) {
+                    scope.spawn(|| {
+                        let _lane = stats::lane(opts.stats.as_ref());
+                        workers.sync_priority();
+                        loop {
+                            let i = next.fetch_add(1, Ordering::Relaxed);
+                            let Some(&s) = batch.get(i) else { break };
+                            let done = compress_small(s, plan, opts, tracker);
+                            *slots[i].lock().unwrap_or_else(PoisonError::into_inner) = Some(done);
+                        }
+                    });
+                }
+            });
         });
         for (s, slot) in batch.drain(..).zip(slots) {
             let prepared = slot
@@ -501,7 +528,7 @@ impl ArchiveFormat for ZipFormat {
         let secret = opts.secret()?;
         let input_len = stream_len(input)?;
         let shared = Mutex::new(input);
-        let mut archive = open(&shared)?;
+        let mut archive = open(&shared, opts.stats.as_ref())?;
         if archive.has_duplicate_names() {
             return Err(Error::InvalidArchive("duplicate entry names".into()));
         }
@@ -582,14 +609,17 @@ impl ArchiveFormat for ZipFormat {
             // Keep archive order: whatever is queued goes in before this entry.
             c.flush_batch(&mut batch, threads)?;
             if s.kind == EntryKind::File {
-                c.add_streamed(s)?;
+                stats::time_file(opts.stats.as_ref(), || c.add_streamed(s))?;
             } else {
                 c.add_other(s)?;
             }
             c.tracker.entry_done(&s.name);
         }
         c.flush_batch(&mut batch, workers.active())?;
-        c.zw.finish()?.flush()?;
+        // Central directory and the last buffered bytes: handed to the OS, not synced.
+        stats::timed(opts.stats.as_ref(), Class::Finish, || {
+            c.zw.finish()?.flush().map_err(Error::from)
+        })?;
         Ok(())
     }
 }

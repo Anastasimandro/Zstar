@@ -235,12 +235,20 @@ fn case_only_collisions_are_still_found_with_compact_keys() {
         ..Options::default()
     };
     let dest = tmp.path().join("d");
-    // On a case-sensitive file system both land; on an insensitive one extraction must not
-    // run in parallel. Either way it must not fail or lose an entry silently.
-    let summary = extract(&mut Cursor::new(zip.finish()), &dest, &opts).unwrap();
-    assert_eq!(summary.files, 2);
-    assert_exists(&dest.join("Dir/File.txt"));
-    assert_exists(&dest.join("dir/file.txt"));
+    // On a case-sensitive file system both land. On an insensitive one (Windows, macOS) the
+    // second would overwrite the first, so extraction must refuse it: an error, never a
+    // silent loss.
+    match extract(&mut Cursor::new(zip.finish()), &dest, &opts) {
+        Ok(summary) => {
+            assert_eq!(summary.files, 2);
+            assert_exists(&dest.join("Dir/File.txt"));
+            assert_exists(&dest.join("dir/file.txt"));
+        }
+        Err(e) => assert!(
+            matches!(e, Error::AlreadyExists(_)),
+            "unexpected error: {e:?}"
+        ),
+    }
 }
 
 fn assert_exists(p: &Path) {

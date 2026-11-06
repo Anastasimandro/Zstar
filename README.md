@@ -47,6 +47,24 @@ Every key is defined in the module docs of
 [docs/reports/io-measurement.md](docs/reports/io-measurement.md) and what the counters cost in
 [docs/reports/stats-overhead-v2.md](docs/reports/stats-overhead-v2.md).
 
+## Limits on huge trees
+
+Creating an archive walks the source tree on a helper thread and hands the entries to the
+writer through a bounded queue, so nothing holds the whole tree. Siblings are still sorted per
+directory, parents come before children and the archives are byte for byte the same as before.
+Zip extraction keeps its full security check before the first write, but stores the plan
+compactly (each name once plus 24 bytes per entry). Four limits apply to both, are errors when
+exceeded (never a skipped check) and can be raised or removed with `--no-limits`:
+
+- `--max-entries` (default 10,000,000 entries), `--max-path` (default 32 KiB per entry name),
+  `--max-depth` (default 1,024 components) and `--max-metadata` (default 1 GiB of metadata held
+  in memory: directory listings of the walk, the zip plan, and what the zip and 7z writers keep
+  until they finish). The same keys exist under `[limits]` in the config file.
+- While a tree is still being walked the progress total is unknown (`None`); it becomes known
+  when the walk ends.
+
+Numbers: [docs/reports/metadata-streaming.md](docs/reports/metadata-streaming.md).
+
 ## Build
 
 ```

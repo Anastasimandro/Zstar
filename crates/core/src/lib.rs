@@ -57,7 +57,7 @@ pub use format::{ArchiveFormat, EntryInfo, EntryKind, Format, ReadSeek, WriteSee
 pub use options::{Limits, OpenHook, Options, Password, Progress, ProgressFn, ZipMethod};
 pub use path::sanitize as sanitize_entry_name;
 pub use profile::{DriveKind, Profile, Settings, settings_for};
-pub use sources::{SourceEntry, collect_sources};
+pub use sources::{Listed, SourceEntry, SourceStream, Totals, collect_sources};
 pub use stats::{Stage, Stats, StatsSnapshot};
 
 /// Lists the entries of an archive, detecting its format first.
@@ -150,19 +150,14 @@ fn create_file_inner(
     let part = extract::part_path(output);
     let part_abs = extract::part_path(&output_abs);
     let st = opts.stats.as_ref();
-    let sources = stats::timed(st, stats::Class::Input, || {
-        collect_sources(inputs, &[output_abs, part_abs])
-    })?;
-    // One metadata call per entry; listing directories is not counted (see the stats docs).
-    if let Some(s) = st {
-        s.count(stats::FsOp::StatSrc, sources.len() as u64);
-    }
-
     let written = stats::fs(st, stats::FsOp::CreateOut, || File::create(&part))
         .map_err(Error::from)
         .and_then(|file| {
             let mut file = stats::Timed::new(file, opts.stats.clone());
-            handler.create(&sources, &mut file, opts)?;
+            // The tree is walked on a helper thread while the format writes.
+            sources::with_walk(inputs, &[output_abs, part_abs], opts, |stream| {
+                handler.create_stream(stream, &mut file, opts)
+            })?;
             // Closing is where the OS may make us wait; it hands the data over, no fsync.
             stats::timed(st, stats::Class::Finish, || drop(file));
             Ok(())

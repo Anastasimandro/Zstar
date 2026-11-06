@@ -84,6 +84,26 @@ fn bomb_limit_gives_a_hint_and_failure_status() {
 }
 
 #[test]
+fn metadata_limits_are_flags_with_hints() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join("t/a/b")).unwrap();
+    fs::write(cwd.join("t/a/b/f.txt"), "x").unwrap();
+    for (flag, value, hint) in [
+        ("--max-depth", "2", "--max-depth"),
+        ("--max-path", "5", "--max-path"),
+        ("--max-metadata", "10", "--max-metadata"),
+    ] {
+        let o = zstar(&["compress", "o.zip", "t", flag, value], cwd);
+        assert_eq!(o.status.code(), Some(1), "{flag}: {}", stderr(&o));
+        assert!(stderr(&o).contains(hint), "{flag}: {}", stderr(&o));
+        assert!(!cwd.join("o.zip").exists(), "{flag} left an archive");
+    }
+    let ok = zstar(&["compress", "o.zip", "t", "--max-depth", "9"], cwd);
+    assert!(ok.status.success(), "{}", stderr(&ok));
+}
+
+#[test]
 fn usage_errors_exit_with_status_2() {
     let tmp = tempfile::tempdir().unwrap();
     for args in [

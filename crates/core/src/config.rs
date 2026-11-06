@@ -13,6 +13,9 @@
 //! max_ratio        = 500     # output:archive ratio, 0 = off
 //! ratio_min_bytes  = "256M"  # the ratio is only checked past this much output
 //! max_memory_bytes = "1G"    # decoder dictionary size
+//! max_path_bytes   = 32_768  # longest entry name, in bytes
+//! max_depth        = 1024    # deepest entry, in name components
+//! max_metadata_bytes = "1G"  # names and listings held in memory
 //! ```
 
 use crate::error::{Error, Result};
@@ -72,6 +75,9 @@ pub fn apply_toml(text: &str, opts: &mut Options) -> Result<()> {
             ("limits", "max_ratio") => limits.max_ratio = number()?,
             ("limits", "ratio_min_bytes") => limits.ratio_min_bytes = number()?,
             ("limits", "max_memory_bytes") => limits.max_memory_bytes = number()?,
+            ("limits", "max_path_bytes") => limits.max_path_bytes = number()?,
+            ("limits", "max_depth") => limits.max_depth = number()?,
+            ("limits", "max_metadata_bytes") => limits.max_metadata_bytes = number()?,
             _ => return Err(bad(n, format!("unknown key `{key}`"))),
         }
     }

@@ -67,6 +67,10 @@ extract:
         --max-ratio <N>    stop above this output:archive ratio, 0 = off (default 500)
         --max-memory <SIZE>  refuse decoders asking for more memory (xz/7z dictionary),
                            e.g. 512M (default 1G)
+        --max-path <N>     refuse entry names longer than N bytes (default 32768)
+        --max-depth <N>    refuse entries nested deeper than N components (default 1024)
+        --max-metadata <SIZE>  refuse to hold more than this much entry metadata in memory
+                           (names, listings), e.g. 512M (default 1G)
         --no-limits        disable all bomb protection (trusted archives only)
 
 The archive format is detected from its contents, never from its name, except for
@@ -221,6 +225,16 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Cli>, String
                 let v: String = p.value().map_err(e)?.parse().map_err(e)?;
                 opts.limits.max_memory_bytes = parse_size(&v)?;
             }
+            Long("max-path") => {
+                opts.limits.max_path_bytes = p.value().map_err(e)?.parse().map_err(e)?
+            }
+            Long("max-depth") => {
+                opts.limits.max_depth = p.value().map_err(e)?.parse().map_err(e)?
+            }
+            Long("max-metadata") => {
+                let v: String = p.value().map_err(e)?.parse().map_err(e)?;
+                opts.limits.max_metadata_bytes = parse_size(&v)?;
+            }
             Long("password-file") => {
                 let path: PathBuf = p.value().map_err(e)?.into();
                 opts.password = Some(read_password_file(&path)?);
@@ -344,6 +358,15 @@ fn hint(e: &Error) -> &'static str {
         }
         Error::LimitExceeded(LimitKind::Ratio) => {
             "raise it with --max-ratio (0 = off) or `max_ratio` under [limits] in the config file, or use --no-limits if you trust the archive"
+        }
+        Error::LimitExceeded(LimitKind::PathLength) => {
+            "raise it with --max-path or `max_path_bytes` under [limits] in the config file, or use --no-limits if you trust the archive"
+        }
+        Error::LimitExceeded(LimitKind::Depth) => {
+            "raise it with --max-depth or `max_depth` under [limits] in the config file, or use --no-limits if you trust the archive"
+        }
+        Error::LimitExceeded(LimitKind::Metadata) => {
+            "raise it with --max-metadata or `max_metadata_bytes` under [limits] in the config file, or use --no-limits if you trust the archive"
         }
         Error::AlreadyExists(_) => "use --force to overwrite",
         Error::PasswordRequired | Error::WrongPassword => {

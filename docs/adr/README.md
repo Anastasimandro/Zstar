@@ -18,4 +18,4 @@ Each ADR has a status, the context, the decision and its consequences. Keep it s
 | [0008](0008-control-handle-and-profiles.md) | Control handle and drive profiles | Accepted |
 | [0009](0009-drive-detection-and-thread-priority.md) | Drive detection and thread priority (crate sys) | Accepted |
 | [0010](0010-measure-first-adaptive-io.md) | Measure first, then regulate by measurement | Accepted |
-| [0011](0011-evidence-bounded-metadata-zip-ab.md) | Better evidence, bounded metadata memory, zip upgrade as an A/B | Accepted (Part 1) |
+| [0011](0011-evidence-bounded-metadata-zip-ab.md) | Better evidence, bounded metadata memory, zip upgrade as an A/B | Accepted (Parts 1 and 2) |

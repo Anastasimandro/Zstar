@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::control::{Control, WorkerHook, Workers};
-use crate::error::{Error, Result};
+use crate::error::{Error, LimitKind, Result};
 use crate::profile::{DriveKind, Profile, Settings, cpus, settings_for};
 use crate::stats::{Source, Stats, StatsSnapshot, Timed};
 
@@ -46,6 +46,17 @@ pub struct Limits {
     /// stream). A few bytes of header can otherwise demand gigabytes. `u64::MAX` disables
     /// the check.
     pub max_memory_bytes: u64,
+    /// Longest entry name, in bytes, when creating archives and when extracting them.
+    /// `u64::MAX` disables the check.
+    pub max_path_bytes: u64,
+    /// Deepest entry, counted in name components, when creating and when extracting.
+    /// `u64::MAX` disables the check.
+    pub max_depth: u64,
+    /// Most metadata one operation may hold in memory: the directory listings of the walk
+    /// over the sources, the compact plan of a zip extraction, and what zip and 7z writers
+    /// keep per entry until they finish (estimated as name, link target and 128 bytes).
+    /// `u64::MAX` disables the check.
+    pub max_metadata_bytes: u64,
 }
 
 impl Limits {
@@ -57,7 +68,21 @@ impl Limits {
             max_ratio: 0,
             ratio_min_bytes: 0,
             max_memory_bytes: u64::MAX,
+            max_path_bytes: u64::MAX,
+            max_depth: u64::MAX,
+            max_metadata_bytes: u64::MAX,
         }
+    }
+
+    /// Fails when a name of `len` bytes or `depth` components is over the limits.
+    pub(crate) fn check_name(&self, len: usize, depth: usize) -> Result<()> {
+        if len as u64 > self.max_path_bytes {
+            return Err(Error::LimitExceeded(LimitKind::PathLength));
+        }
+        if depth as u64 > self.max_depth {
+            return Err(Error::LimitExceeded(LimitKind::Depth));
+        }
+        Ok(())
     }
 }
 
@@ -69,6 +94,9 @@ impl Default for Limits {
             max_ratio: 500,
             ratio_min_bytes: 256 << 20,
             max_memory_bytes: 1 << 30,
+            max_path_bytes: 32 << 10,
+            max_depth: 1024,
+            max_metadata_bytes: 1 << 30,
         }
     }
 }

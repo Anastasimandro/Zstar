@@ -1,6 +1,6 @@
 # 0011: Better evidence, bounded metadata memory, zip upgrade as an A/B
 
-- Status: Accepted (Part 1 only; Parts 2 and 3 are added by the commits that do them)
+- Status: Accepted (Parts 1 and 2; Part 3 is added by the commit that does it)
 - Date: 2026-11-05
 - Changes: section 5 (engine) of [`../DECISIONS.md`](../DECISIONS.md); builds on [0010](0010-measure-first-adaptive-io.md)
 
@@ -52,3 +52,55 @@ Consequences and limits:
 - The new numbers showed that zip extraction reads 380 times the archive size from the OS on
   10,000 tiny entries (a fixed 64 KiB buffer refilled per entry). Recorded, not changed here:
   it belongs to Part 3, where the read buffer is a variable.
+
+## Part 2: bounded metadata memory
+
+Decisions:
+
+- **The source tree is streamed.** A walker thread produces entries in the same order as before
+  (inputs in order, parents before children, siblings sorted per directory) and hands them to
+  the format through a bounded queue (1,024 entries plus two batches of 128 in flight). The
+  format reads `SourceStream::next_entry`; `ArchiveFormat::create` stays as a default method
+  over a slice for callers that have a list. A walker that dies is never mistaken for the end
+  of the tree. Only one directory's sorted names are held per level of depth.
+- **Entries travel in batches of 128.** The first version sent one entry per message and cost
+  +20% wall time on 100,000 files (paired run, same machine state): every hand-over woke the
+  other thread. Batching brought it to +1 to +5% on zip and 7z, and tar.gz is faster than
+  before.
+- **ZIP extraction keeps the whole preflight before the first write** (zip-slip, names, entry
+  and size limits, case collisions) but stores each name once in an arena with 24 bytes per
+  entry. Paths, modes and times are derived again at extraction (the same checks run twice
+  on purpose). Collision keys are 64-bit keyed hashes of the lowercase path; a hash collision
+  between two different paths only forces serial extraction, which is always safe, so it
+  cannot hide a real collision.
+- **Four limits, all errors when exceeded, never a skipped check**: `max_entries` (existing),
+  and new `max_path_bytes` (32 KiB), `max_depth` (1,024) and `max_metadata_bytes` (1 GiB). The
+  last one counts the walker's directory listings, the zip plan, and what the zip and 7z
+  writers keep until they finish (name, link target and an estimated 128 bytes per entry).
+  They apply to creating and to extracting, have CLI flags (`--max-path`, `--max-depth`,
+  `--max-metadata`), config keys under `[limits]`, and `--no-limits` turns them off with the
+  others. **The defaults are my choice, not the owner's**: they are well above any real
+  tree, below anything that exhausts a desktop, and easy to change.
+- **Progress totals are unknown while the tree is walked** (`None`), and known when the walk
+  ends. A progress bar with a percentage cannot show it before then. The bytes done and
+  entries done are exact throughout.
+- **Cancelling during the walk now works** (3 s to 5 ms at 1M entries).
+
+Numbers: [metadata-streaming.md](../reports/metadata-streaming.md). At 1M entries peak RSS
+falls from 449 to 28 MiB for tar.gz creation and from 585 to 259 MiB for zip; zip extraction
+from 568 to 405 MiB; time to first progress from seconds to milliseconds; archives are
+byte-identical to before; `tests/security.rs` is unchanged and passes.
+
+Consequences and limits:
+
+- **Memory is still O(entries) in four places**: the zip writer (about 230 to 260 bytes per
+  entry), the 7z writer and its list (7z needs every entry before its first byte), the `zip`
+  crate's copy of the central directory held by each extraction worker (the 400 MiB left in
+  zip extraction), and a single huge directory (its names are held to sort them). The first
+  and the third are for Task 3.
+- Allocation calls in zip extraction rise 13% to 23% from deriving paths again; user CPU did
+  not rise. Extraction wall time on the test VM cannot be resolved (the same binary takes 94 s
+  or 141 s on the same input), so none is claimed.
+- The walker is a second thread; it shows in `--stats` thread-seconds as its own lane. Time it
+  spends waiting for a full queue is classed as idle and is not counted anywhere.
+- Not measured: spinning disks, cold cache, Windows, macOS, Android.

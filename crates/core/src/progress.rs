@@ -1,6 +1,8 @@
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::options::{Options, Progress};
+use crate::sources::Totals;
 
 /// Thread-safe counters behind the progress callback.
 pub(crate) struct Tracker<'a> {
@@ -9,6 +11,8 @@ pub(crate) struct Tracker<'a> {
     entries: AtomicU64,
     bytes_total: Option<u64>,
     entries_total: Option<u64>,
+    /// Totals that appear while a tree is still being walked; they replace the fixed ones.
+    totals: Option<Arc<Totals>>,
 }
 
 impl<'a> Tracker<'a> {
@@ -23,6 +27,16 @@ impl<'a> Tracker<'a> {
             entries: AtomicU64::new(0),
             bytes_total,
             entries_total,
+            totals: None,
+        }
+    }
+
+    /// A tracker whose totals are unknown until the walk over the sources has finished.
+    #[cfg_attr(not(any(feature = "zip", feature = "tar")), allow(dead_code))]
+    pub(crate) fn streaming(opts: &'a Options, totals: Arc<Totals>) -> Self {
+        Tracker {
+            totals: Some(totals),
+            ..Tracker::new(opts, None, None)
         }
     }
 
@@ -46,11 +60,15 @@ impl<'a> Tracker<'a> {
 
     fn report(&self, bytes_done: u64, entries_done: u64, current: &str) {
         if let Some(cb) = &self.opts.progress {
+            let (bytes_total, entries_total) = match &self.totals {
+                Some(t) => t.known().unzip(),
+                None => (self.bytes_total, self.entries_total),
+            };
             cb(&Progress {
                 bytes_done,
-                bytes_total: self.bytes_total,
+                bytes_total,
                 entries_done,
-                entries_total: self.entries_total,
+                entries_total,
                 current,
             });
         }

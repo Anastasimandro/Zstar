@@ -13,7 +13,7 @@ use crate::formats::codec::Codec;
 use crate::formats::stream_len;
 use crate::options::Options;
 use crate::progress::Tracker;
-use crate::sources::SourceEntry;
+use crate::sources::{SourceEntry, SourceStream};
 
 pub(crate) struct SingleFormat {
     codec: Codec,
@@ -84,9 +84,11 @@ fn read_chunk(src: &mut dyn Read, buf: &mut [u8]) -> io::Result<usize> {
     }
 }
 
-fn only_one_file(sources: &[SourceEntry], what: &str) -> Result<()> {
-    match sources {
-        [one] if one.kind == EntryKind::File => Ok(()),
+/// The one file to compress; anything else, or a second entry, is an error.
+fn only_one_file(sources: &mut dyn SourceStream, what: &str) -> Result<SourceEntry> {
+    let first = sources.next_entry()?;
+    match first {
+        Some(one) if one.kind == EntryKind::File && sources.next_entry()?.is_none() => Ok(one),
         _ => Err(Error::InvalidOption(format!(
             "{what} stores exactly one file; use a tar format for several files or directories"
         ))),
@@ -152,16 +154,15 @@ impl ArchiveFormat for SingleFormat {
             })
     }
 
-    fn create(
+    fn create_stream(
         &self,
-        sources: &[SourceEntry],
+        sources: &mut dyn SourceStream,
         out: &mut dyn WriteSeek,
         opts: &Options,
     ) -> Result<()> {
         super::no_password(opts, self.format)?;
         let level = self.codec.level(opts.level)?;
-        only_one_file(sources, self.format.name())?;
-        let src = &sources[0];
+        let src = &only_one_file(sources, self.format.name())?;
         let tracker = Tracker::new(opts, Some(src.size), Some(1));
         let mut file = opts.open_source(&src.path)?;
         crate::stats::time_file(opts.stats.as_ref(), || {

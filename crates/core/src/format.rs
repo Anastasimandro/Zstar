@@ -5,7 +5,7 @@ use std::time::SystemTime;
 use crate::error::{Error, Result};
 use crate::extract::Summary;
 use crate::options::Options;
-use crate::sources::SourceEntry;
+use crate::sources::{Listed, SourceEntry, SourceStream};
 
 /// An archive format known to Zstar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -189,13 +189,24 @@ pub trait ArchiveFormat: Sync {
     /// Extracts into `dest`, enforcing the path-safety rules and the limits in `opts`.
     fn extract(&self, input: &mut dyn ReadSeek, dest: &Path, opts: &Options) -> Result<Summary>;
 
-    /// Writes `sources` as a new archive.
+    /// Writes the entries of `sources` as a new archive, reading them as they come: a format
+    /// must not collect the stream unless its container needs every entry up front.
+    fn create_stream(
+        &self,
+        sources: &mut dyn SourceStream,
+        out: &mut dyn WriteSeek,
+        opts: &Options,
+    ) -> Result<()>;
+
+    /// Writes `sources`, a list already in memory, as a new archive.
     fn create(
         &self,
         sources: &[SourceEntry],
         out: &mut dyn WriteSeek,
         opts: &Options,
-    ) -> Result<()>;
+    ) -> Result<()> {
+        self.create_stream(&mut Listed::new(sources), out, opts)
+    }
 }
 
 /// Returns the handler for `format`, or [`Error::FeatureDisabled`].

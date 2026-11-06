@@ -16,7 +16,7 @@ use crate::formats::codec::Codec;
 use crate::formats::stream_len;
 use crate::options::Options;
 use crate::progress::Tracker;
-use crate::sources::SourceEntry;
+use crate::sources::SourceStream;
 use crate::stats::Source;
 
 const BUF: usize = 64 * 1024;
@@ -158,11 +158,10 @@ impl Read for Counting<'_, '_> {
     }
 }
 
-fn write_tar<W: Write>(w: W, sources: &[SourceEntry], opts: &Options) -> Result<W> {
-    let total = sources.iter().map(|s| s.size).sum();
-    let tracker = Tracker::new(opts, Some(total), Some(sources.len() as u64));
+fn write_tar<W: Write>(w: W, sources: &mut dyn SourceStream, opts: &Options) -> Result<W> {
+    let tracker = Tracker::streaming(opts, sources.totals());
     let mut builder = tar::Builder::new(BufWriter::with_capacity(BUF, w));
-    for s in sources {
+    while let Some(s) = sources.next_entry()? {
         opts.check_cancel()?;
         let mut header = Header::new_gnu();
         header.set_mtime(
@@ -289,9 +288,9 @@ impl ArchiveFormat for TarFormat {
         })
     }
 
-    fn create(
+    fn create_stream(
         &self,
-        sources: &[SourceEntry],
+        sources: &mut dyn SourceStream,
         out: &mut dyn WriteSeek,
         opts: &Options,
     ) -> Result<()> {

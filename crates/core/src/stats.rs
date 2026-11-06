@@ -53,6 +53,10 @@
 //!   not the time until it is on the disk**; the stats never present it as physical
 //!   completion. Writes made inside a finishing step count here and not in `wait_output`.
 //!
+//! The thread that walks the source tree while archiving runs beside the format and is counted
+//! like any other, except for the time it sits idle because the queue to the format is full:
+//! that time is taken out and counted nowhere.
+//!
 //! Threads inside third-party codecs (7z LZMA2, zstd and xz multi-thread) are not seen: the
 //! thread that drives them shows their time as `busy`.
 //!
@@ -179,10 +183,11 @@ struct Acc {
     workers: u64,
     finish: u64,
     parked: u64,
+    idle: u64,
 }
 
 thread_local! {
-    static ACC: Cell<Acc> = const { Cell::new(Acc { input: 0, output: 0, workers: 0, finish: 0, parked: 0 }) };
+    static ACC: Cell<Acc> = const { Cell::new(Acc { input: 0, output: 0, workers: 0, finish: 0, parked: 0, idle: 0 }) };
     /// A timed span is open on this thread and will add its whole duration itself, so the
     /// adapters inside it must not add theirs a second time.
     static IN_SPAN: Cell<bool> = const { Cell::new(false) };
@@ -196,6 +201,10 @@ pub(crate) enum Class {
     #[cfg_attr(not(any(feature = "zip", feature = "gzip")), allow(dead_code))]
     Workers,
     Finish,
+    /// A helper thread idle because its queue is full: taken out of its time and counted
+    /// nowhere, so a walker that is ahead of the format does not look like waiting.
+    #[cfg_attr(not(feature = "zip"), allow(dead_code))]
+    Idle,
 }
 
 fn add_acc(class: Class, ns: u64) {
@@ -206,6 +215,7 @@ fn add_acc(class: Class, ns: u64) {
             Class::Output => a.output += ns,
             Class::Workers => a.workers += ns,
             Class::Finish => a.finish += ns,
+            Class::Idle => a.idle += ns,
         }
         c.set(a);
     });
@@ -303,8 +313,9 @@ impl Drop for Lane {
             part(now.finish, l.base.finish),
         );
         let parked = part(now.parked, l.base.parked);
+        let idle = part(now.idle, l.base.idle);
         let elapsed = nanos(l.start.elapsed());
-        let busy = elapsed.saturating_sub(input + output + workers + finish + parked);
+        let busy = elapsed.saturating_sub(input + output + workers + finish + parked + idle);
         c.busy_ns.fetch_add(busy, Relaxed);
         c.wait_input_ns.fetch_add(input, Relaxed);
         c.wait_output_ns.fetch_add(output, Relaxed);

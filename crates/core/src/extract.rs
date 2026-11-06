@@ -107,7 +107,11 @@ impl<'a> Session<'a> {
 
     #[cfg_attr(not(feature = "tar"), allow(dead_code))]
     pub(crate) fn rel_path(&self, name: &[u8]) -> Result<PathBuf> {
-        sanitize(name, self.opts.windows_names)
+        let rel = sanitize(name, self.opts.windows_names)?;
+        self.opts
+            .limits
+            .check_name(name.len(), rel.components().count())?;
+        Ok(rel)
     }
 
     /// Size of the fixed copy buffer each worker uses.

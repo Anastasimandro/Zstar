@@ -210,7 +210,7 @@ fn every_operation_reports_its_dominant_stage_and_exact_counts() {
         assert!(thread_time(&c) + c.parked >= c.op, "{format:?} {c:?}");
         assert!(
             thread_time(&c)
-                <= c.op * (c.threads_pool.max(1) as u32 + 1) + std::time::Duration::from_millis(50),
+                <= c.op * (c.threads_pool.max(1) as u32 + 2) + std::time::Duration::from_millis(50),
             "{format:?} {c:?}"
         );
         assert!(c.opens >= expected, "{format:?} {c:?}");

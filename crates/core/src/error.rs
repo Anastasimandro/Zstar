@@ -15,6 +15,12 @@ pub enum LimitKind {
     Ratio,
     /// Memory a decoder asks for (compression dictionary size).
     Memory,
+    /// Length of one entry name, in bytes.
+    PathLength,
+    /// Nesting depth of an entry: the number of components of its name.
+    Depth,
+    /// Metadata held in memory: names, link targets and directory listings.
+    Metadata,
 }
 
 impl LimitKind {
@@ -25,6 +31,9 @@ impl LimitKind {
             LimitKind::Entries => "limits.max_entries",
             LimitKind::Ratio => "limits.max_ratio",
             LimitKind::Memory => "limits.max_memory_bytes",
+            LimitKind::PathLength => "limits.max_path_bytes",
+            LimitKind::Depth => "limits.max_depth",
+            LimitKind::Metadata => "limits.max_metadata_bytes",
         }
     }
 }
@@ -96,6 +105,9 @@ impl fmt::Display for Error {
                     LimitKind::Entries => "number of entries",
                     LimitKind::Ratio => "compression ratio (possible decompression bomb)",
                     LimitKind::Memory => "memory a decoder asks for (compression dictionary size)",
+                    LimitKind::PathLength => "length of an entry name",
+                    LimitKind::Depth => "nesting depth of an entry",
+                    LimitKind::Metadata => "metadata held in memory (names and directory listings)",
                 };
                 write!(
                     f,

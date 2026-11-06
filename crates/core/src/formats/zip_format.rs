@@ -3,9 +3,9 @@
 //! Every worker opens its own `ZipArchive` over a shared reader. The reader is locked only
 //! for the moment bytes are fetched; inflating and writing happen outside the lock.
 
-use std::collections::HashSet;
+use std::hash::{BuildHasher, Hasher, RandomState};
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Instant, SystemTime};
@@ -22,7 +22,7 @@ use crate::format::{ArchiveFormat, EntryInfo, EntryKind, Format, ReadSeek, Write
 use crate::formats::stream_len;
 use crate::options::{Options, ZipMethod};
 use crate::progress::Tracker;
-use crate::sources::SourceEntry;
+use crate::sources::{MetaBudget, SourceEntry, SourceStream};
 use crate::stats::{self, Class, Stats};
 use crate::timeconv::{Civil, civil_to_system, system_to_civil};
 
@@ -147,25 +147,23 @@ fn describe(entry: &zip::read::ZipFileEntry<'_>) -> Result<EntryInfo> {
     })
 }
 
-struct FileItem {
+/// One kept entry of the plan: its place in the archive and where its name is stored.
+#[derive(Clone, Copy)]
+struct Item {
     index: usize,
-    rel: PathBuf,
-    name: String,
-    mode: Option<u32>,
-    mtime: Option<SystemTime>,
+    name_at: u64,
+    name_len: u32,
 }
 
-struct LinkItem {
-    index: usize,
-    rel: PathBuf,
-    name: String,
-}
-
-/// Everything extraction will do, decided before anything is written.
+/// Everything extraction will do, decided before anything is written. Stored compactly: every
+/// name exists once, in `names`, and paths, modes and times are derived again when an entry
+/// is extracted (the same checks run again), so the plan costs about the length of each name
+/// plus 24 bytes per entry, whatever the archive holds.
 struct Plan {
-    dirs: Vec<PathBuf>,
-    files: Vec<FileItem>,
-    links: Vec<LinkItem>,
+    names: Vec<u8>,
+    dirs: Vec<Item>,
+    files: Vec<Item>,
+    links: Vec<Item>,
     total_bytes: u64,
     entries: u64,
     /// Two names differ only by case: on a case-insensitive file system they would collide,
@@ -173,13 +171,38 @@ struct Plan {
     case_collision: bool,
 }
 
+/// Key of a path for collision detection: a keyed 64-bit hash of its lowercase form. Equal
+/// lowercase paths always give equal keys; two different ones giving the same key (about
+/// 2^-64 per pair) only makes extraction serial, which is always safe.
+fn collision_key(state: &RandomState, rel: &Path, scratch: &mut String) -> u64 {
+    let text = rel.to_string_lossy();
+    scratch.clear();
+    if text.is_ascii() {
+        scratch.extend(text.bytes().map(|b| char::from(b.to_ascii_lowercase())));
+    } else {
+        scratch.push_str(&text.to_lowercase());
+    }
+    let mut hasher = state.build_hasher();
+    hasher.write(scratch.as_bytes());
+    hasher.finish()
+}
+
 impl Plan {
+    fn name(&self, item: &Item) -> Result<&str> {
+        let at = item.name_at as usize;
+        self.names
+            .get(at..at + item.name_len as usize)
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .ok_or_else(|| Error::InvalidArchive("entry name is not valid UTF-8".into()))
+    }
+
     fn build<R: Read + Seek>(archive: &ZipArchive<R>, opts: &Options) -> Result<Plan> {
         let entries = archive.len() as u64;
         if entries > opts.limits.max_entries {
             return Err(Error::LimitExceeded(LimitKind::Entries));
         }
         let mut plan = Plan {
+            names: Vec::new(),
             dirs: Vec::new(),
             files: Vec::new(),
             links: Vec::new(),
@@ -187,42 +210,49 @@ impl Plan {
             entries,
             case_collision: false,
         };
-        let mut seen = HashSet::new();
+        let mut meta = MetaBudget::new(opts.limits.max_metadata_bytes);
+        let state = RandomState::new();
+        let mut keys: Vec<u64> = Vec::new();
+        let mut scratch = String::new();
         for index in 0..archive.len() {
             opts.check_cancel()?;
             let entry = archive.by_index_data(index)?;
-            let info = describe(&entry)?;
+            let kind = kind_of(entry.is_dir(), entry.unix_mode());
+            let name = entry.name()?;
             // Zip-slip barrier: one bad name rejects the whole archive before any write.
-            let rel = crate::path::sanitize(info.name.as_bytes(), opts.windows_names)?;
-            if matches!(info.kind, EntryKind::File | EntryKind::Dir)
-                && !seen.insert(rel.to_string_lossy().to_lowercase())
-                && !rel.as_os_str().is_empty()
-            {
-                plan.case_collision = true;
+            let rel = crate::path::sanitize(name.as_bytes(), opts.windows_names)?;
+            opts.limits
+                .check_name(name.len(), rel.components().count())?;
+            // An empty path (the destination itself) never collides with anything.
+            if matches!(kind, EntryKind::File | EntryKind::Dir) && !rel.as_os_str().is_empty() {
+                keys.push(collision_key(&state, &rel, &mut scratch));
             }
-            match info.kind {
-                EntryKind::Dir => plan.dirs.push(rel),
+            if !matches!(kind, EntryKind::Dir | EntryKind::File | EntryKind::Symlink) {
+                continue;
+            }
+            // The name, its item and its collision key: what this entry costs while planned.
+            meta.charge_bytes(name.len() as u64 + size_of::<Item>() as u64 + 8)?;
+            let item = Item {
+                index,
+                name_at: plan.names.len() as u64,
+                name_len: u32::try_from(name.len())
+                    .map_err(|_| Error::LimitExceeded(LimitKind::PathLength))?,
+            };
+            plan.names.extend_from_slice(name.as_bytes());
+            match kind {
+                EntryKind::Dir => plan.dirs.push(item),
                 EntryKind::File => {
-                    plan.total_bytes = plan.total_bytes.saturating_add(info.size);
-                    plan.files.push(FileItem {
-                        index,
-                        rel,
-                        name: info.name,
-                        mode: info.mode,
-                        mtime: info.mtime,
-                    });
+                    plan.total_bytes = plan.total_bytes.saturating_add(entry.size());
+                    plan.files.push(item);
                 }
-                EntryKind::Symlink => plan.links.push(LinkItem {
-                    index,
-                    rel,
-                    name: info.name,
-                }),
-                _ => {}
+                _ => plan.links.push(item),
             }
         }
         if plan.total_bytes > opts.limits.max_total_bytes {
             return Err(Error::LimitExceeded(LimitKind::TotalSize));
         }
+        keys.sort_unstable();
+        plan.case_collision = keys.windows(2).any(|w| w[0] == w[1]);
         Ok(plan)
     }
 }
@@ -241,7 +271,7 @@ fn entry<'a, R: Read + Seek>(
 
 fn worker(
     shared: &Mutex<&mut dyn ReadSeek>,
-    files: &[FileItem],
+    plan: &Plan,
     session: &Session<'_>,
     next: &AtomicUsize,
     secret: Option<&str>,
@@ -254,21 +284,23 @@ fn worker(
         workers.checkpoint(
             index,
             || session.check_stop(),
-            || next.load(Ordering::Relaxed) >= files.len(),
+            || next.load(Ordering::Relaxed) >= plan.files.len(),
         )?;
-        let Some(item) = files.get(next.fetch_add(1, Ordering::Relaxed)) else {
+        let Some(item) = plan.files.get(next.fetch_add(1, Ordering::Relaxed)) else {
             return Ok(());
         };
+        let name = plan.name(item)?;
+        let rel = session.rel_path(name.as_bytes())?;
         let mut file = entry(&mut archive, item.index, secret)?;
-        session.write_file(
-            &item.rel, &item.name, &mut file, item.mode, item.mtime, &mut buf,
-        )?;
+        let mode = file.unix_mode().map(|m| m & 0o7777);
+        let mtime = to_system_time(file.last_modified());
+        session.write_file(&rel, name, &mut file, mode, mtime, &mut buf)?;
     }
 }
 
 fn run_workers(
     shared: &Mutex<&mut dyn ReadSeek>,
-    files: &[FileItem],
+    plan: &Plan,
     session: &Session<'_>,
     threads: usize,
     secret: Option<&str>,
@@ -277,7 +309,7 @@ fn run_workers(
     let next = AtomicUsize::new(0);
     let first_error: Mutex<Option<Error>> = Mutex::new(None);
     let work = |index: usize| {
-        if let Err(e) = worker(shared, files, session, &next, secret, workers, index) {
+        if let Err(e) = worker(shared, plan, session, &next, secret, workers, index) {
             // Record the cause before aborting, so the others' "cancelled" never wins.
             first_error
                 .lock()
@@ -467,7 +499,7 @@ impl Creator<'_, '_> {
     }
 
     /// Compresses a run of small files on `threads` workers, then appends them in order.
-    fn flush_batch(&mut self, batch: &mut Vec<&SourceEntry>, threads: usize) -> Result<()> {
+    fn flush_batch(&mut self, batch: &mut Vec<SourceEntry>, threads: usize) -> Result<()> {
         let slots: Vec<Mutex<Option<Result<PreparedZipFile>>>> =
             batch.iter().map(|_| Mutex::new(None)).collect();
         let next = AtomicUsize::new(0);
@@ -485,7 +517,7 @@ impl Creator<'_, '_> {
                         workers.sync_priority();
                         loop {
                             let i = next.fetch_add(1, Ordering::Relaxed);
-                            let Some(&s) = batch.get(i) else { break };
+                            let Some(s) = batch.get(i) else { break };
                             let done = compress_small(s, plan, opts, tracker);
                             *slots[i].lock().unwrap_or_else(PoisonError::into_inner) = Some(done);
                         }
@@ -541,8 +573,8 @@ impl ArchiveFormat for ZipFormat {
             Some(plan.entries),
         )?;
 
-        for rel in &plan.dirs {
-            session.make_dir(rel)?;
+        for item in &plan.dirs {
+            session.make_dir(&session.rel_path(plan.name(item)?.as_bytes())?)?;
         }
         let workers = opts.file_workers();
         let threads = if plan.case_collision {
@@ -550,27 +582,29 @@ impl ArchiveFormat for ZipFormat {
         } else {
             workers.pool.min(plan.files.len()).max(1)
         };
-        run_workers(&shared, &plan.files, &session, threads, secret, &workers)?;
+        run_workers(&shared, &plan, &session, threads, secret, &workers)?;
 
         for link in &plan.links {
+            let name = plan.name(link)?;
+            let rel = session.rel_path(name.as_bytes())?;
             let mut target = Vec::new();
             entry(&mut archive, link.index, secret)?
                 .take(MAX_LINK_TARGET + 1)
                 .read_to_end(&mut target)?;
             if target.len() as u64 > MAX_LINK_TARGET {
                 return Err(Error::UnsafeLink {
-                    name: link.name.clone(),
+                    name: name.to_owned(),
                     target: "<too long>".into(),
                 });
             }
-            session.defer_symlink(link.rel.clone(), target, &link.name)?;
+            session.defer_symlink(rel, target, name)?;
         }
         session.finish()
     }
 
-    fn create(
+    fn create_stream(
         &self,
-        sources: &[SourceEntry],
+        sources: &mut dyn SourceStream,
         out: &mut dyn WriteSeek,
         opts: &Options,
     ) -> Result<()> {
@@ -582,19 +616,21 @@ impl ArchiveFormat for ZipFormat {
                 "zip encryption is not enabled in this build (feature zip-aes)".into(),
             ));
         }
-        let total = sources.iter().map(|s| s.size).sum();
         let mut c = Creator {
             zw: ZipWriter::new(BufWriter::with_capacity(BUF, out)),
             opts,
             plan,
             secret,
-            tracker: Tracker::new(opts, Some(total), Some(sources.len() as u64)),
+            tracker: Tracker::streaming(opts, sources.totals()),
             buf: vec![0u8; opts.io_buffer()],
         };
         let workers = opts.workers();
-        let mut batch: Vec<&SourceEntry> = Vec::new();
-        for s in sources {
+        let mut batch: Vec<SourceEntry> = Vec::new();
+        // The zip writer keeps a central-directory record per entry until it finishes.
+        let mut meta = MetaBudget::new(opts.limits.max_metadata_bytes);
+        while let Some(s) = sources.next_entry()? {
             opts.check_cancel()?;
+            meta.charge(&s)?;
             // Read afresh for every entry: a batch is the unit a change of limit waits for.
             let threads = workers.active();
             // The zip library cannot encrypt outside a ZipWriter, so encrypted archives are serial.
@@ -609,9 +645,9 @@ impl ArchiveFormat for ZipFormat {
             // Keep archive order: whatever is queued goes in before this entry.
             c.flush_batch(&mut batch, threads)?;
             if s.kind == EntryKind::File {
-                stats::time_file(opts.stats.as_ref(), || c.add_streamed(s))?;
+                stats::time_file(opts.stats.as_ref(), || c.add_streamed(&s))?;
             } else {
-                c.add_other(s)?;
+                c.add_other(&s)?;
             }
             c.tracker.entry_done(&s.name);
         }

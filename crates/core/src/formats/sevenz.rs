@@ -24,7 +24,7 @@ use crate::format::{ArchiveFormat, EntryInfo, EntryKind, Format, ReadSeek, Write
 use crate::formats::stream_len;
 use crate::options::Options;
 use crate::progress::Tracker;
-use crate::sources::SourceEntry;
+use crate::sources::{MetaBudget, SourceEntry, SourceStream};
 use crate::stats::Source;
 
 pub(crate) struct SevenZFormat;
@@ -295,12 +295,22 @@ impl ArchiveFormat for SevenZFormat {
         session.finish()
     }
 
-    fn create(
+    fn create_stream(
         &self,
-        sources: &[SourceEntry],
+        sources: &mut dyn SourceStream,
         out: &mut dyn WriteSeek,
         opts: &Options,
     ) -> Result<()> {
+        // 7z puts every directory and empty file before all data and its writer keeps every
+        // entry until it writes the header, so this format reads the whole list first: a
+        // streaming copy could not be written out before the walk ended anyway.
+        let mut list = Vec::new();
+        let mut meta = MetaBudget::new(opts.limits.max_metadata_bytes);
+        while let Some(s) = sources.next_entry()? {
+            meta.charge(&s)?;
+            list.push(s);
+        }
+        let sources = &list[..];
         let level = match opts.level {
             None => 6,
             Some(l) if (0..=9).contains(&l) => l,

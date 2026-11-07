@@ -95,6 +95,7 @@ fn named_after(path: &Path, opts: &Options) -> Options {
     if opts.name_hint.is_none() {
         opts.name_hint = path.file_name().and_then(|n| n.to_str()).map(str::to_owned);
     }
+    opts.source_path = Some(path.to_path_buf());
     opts
 }
 

@@ -207,6 +207,8 @@ pub struct Options {
     /// own, so it extracts to this name minus the extension. The `*_file` functions fill it in;
     /// callers of the stream API may set it, otherwise the output is called `data`.
     pub name_hint: Option<String>,
+    /// EXPERIMENT (zip-upgrade-ab): where the archive being extracted lives, so workers can open it again.
+    pub source_path: Option<std::path::PathBuf>,
     /// Password to decrypt with (extract, list) or to encrypt with (create). Only zip
     /// (WinZip AES-256) and 7z (AES-256) support it; other formats reject it.
     pub password: Option<Password>,
@@ -231,6 +233,7 @@ impl Default for Options {
             stats: None,
             progress: None,
             name_hint: None,
+            source_path: None,
             password: None,
         }
     }

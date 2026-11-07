@@ -96,6 +96,41 @@ fn open<'a, 'b>(
     Ok(ZipArchive::new(reader)?)
 }
 
+type WorkerReader<'a> = BufReader<Box<dyn ReadSeek + 'a>>;
+
+/// EXPERIMENT: buffer of the worker readers. `ZSTAR_EXP_BUF` is a byte count or `profile`.
+fn exp_buf(opts: &Options) -> usize {
+    match std::env::var("ZSTAR_EXP_BUF").as_deref() {
+        Ok("profile") => opts.io_buffer(),
+        Ok(n) => n.parse().unwrap_or(BUF),
+        Err(_) => BUF,
+    }
+}
+
+/// EXPERIMENT: `ZSTAR_EXP_READER=factory` opens the archive again for every worker instead of
+/// sharing one reader behind a Mutex.
+fn open_worker<'a, 'b: 'a>(
+    shared: &'a Mutex<&'b mut (dyn ReadSeek + 'b)>,
+    opts: &Options,
+    stats: Option<&Stats>,
+) -> Result<ZipArchive<WorkerReader<'a>>> {
+    let inner: Box<dyn ReadSeek + 'a> = match (
+        std::env::var("ZSTAR_EXP_READER").as_deref(),
+        &opts.source_path,
+    ) {
+        (Ok("factory"), Some(path)) => Box::new(opts.open_source(path)?),
+        _ => Box::new(Shared {
+            inner: shared,
+            pos: 0,
+            stats: stats.cloned(),
+        }),
+    };
+    Ok(ZipArchive::new(BufReader::with_capacity(
+        exp_buf(opts),
+        inner,
+    ))?)
+}
+
 fn kind_of(is_dir: bool, mode: Option<u32>) -> EntryKind {
     if is_dir {
         return EntryKind::Dir;
@@ -269,8 +304,9 @@ fn entry<'a, R: Read + Seek>(
     }
 }
 
-fn worker(
-    shared: &Mutex<&mut dyn ReadSeek>,
+fn worker<'a, 'b: 'a>(
+    shared: &'a Mutex<&'b mut (dyn ReadSeek + 'b)>,
+    opts: &Options,
     plan: &Plan,
     session: &Session<'_>,
     next: &AtomicUsize,
@@ -278,7 +314,7 @@ fn worker(
     workers: &Workers,
     index: usize,
 ) -> Result<()> {
-    let mut archive = open(shared, workers.stats.as_ref())?;
+    let mut archive = open_worker(shared, opts, workers.stats.as_ref())?;
     let mut buf = vec![0u8; session.io_buffer()];
     loop {
         workers.checkpoint(
@@ -298,8 +334,9 @@ fn worker(
     }
 }
 
-fn run_workers(
-    shared: &Mutex<&mut dyn ReadSeek>,
+fn run_workers<'a, 'b: 'a>(
+    shared: &'a Mutex<&'b mut (dyn ReadSeek + 'b)>,
+    opts: &Options,
     plan: &Plan,
     session: &Session<'_>,
     threads: usize,
@@ -309,7 +346,7 @@ fn run_workers(
     let next = AtomicUsize::new(0);
     let first_error: Mutex<Option<Error>> = Mutex::new(None);
     let work = |index: usize| {
-        if let Err(e) = worker(shared, plan, session, &next, secret, workers, index) {
+        if let Err(e) = worker(shared, opts, plan, session, &next, secret, workers, index) {
             // Record the cause before aborting, so the others' "cancelled" never wins.
             first_error
                 .lock()
@@ -430,28 +467,61 @@ fn file_options<'k>(
     o
 }
 
+/// EXPERIMENT: files up to this many bytes are compressed whole on worker threads.
+/// `ZSTAR_EXP_SMALL`, default [`SMALL_FILE`].
+fn exp_small() -> u64 {
+    std::env::var("ZSTAR_EXP_SMALL")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(SMALL_FILE)
+}
+
+/// EXPERIMENT: bytes of source data a batch may hold before it is flushed. `ZSTAR_EXP_BUDGET`.
+fn exp_budget() -> u64 {
+    std::env::var("ZSTAR_EXP_BUDGET")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(u64::MAX)
+}
+
+/// EXPERIMENT: entries per batch. `ZSTAR_EXP_BATCH`.
+fn exp_batch() -> Option<usize> {
+    std::env::var("ZSTAR_EXP_BATCH").ok()?.parse().ok()
+}
+
 fn compress_small(
     s: &SourceEntry,
     plan: Compression,
     opts: &Options,
     tracker: &Tracker<'_>,
+    cap: u64,
 ) -> Result<PreparedZipFile> {
     opts.check_cancel()?;
     stats::time_file(opts.stats.as_ref(), || {
-        let mut data = Vec::with_capacity(s.size as usize);
-        opts.open_source(&s.path)?
-            .take(SMALL_FILE + 1)
-            .read_to_end(&mut data)?;
-        if data.len() as u64 > SMALL_FILE {
-            return Err(io::Error::other(format!(
-                "{} grew while being archived",
-                s.path.display()
-            ))
-            .into());
-        }
+        // Streamed into the builder in chunks: only the compressed bytes are held.
         let mut builder = ZipFileBuilder::new(&s.name, file_options(s, plan, None))?;
-        builder.write_all(&data)?;
-        tracker.add_bytes(data.len() as u64, &s.name);
+        let mut file = opts.open_source(&s.path)?.take(cap + 1);
+        let mut chunk = vec![0u8; 128 * 1024];
+        let mut total = 0u64;
+        loop {
+            opts.check_cancel()?;
+            let n = match file.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e.into()),
+            };
+            total += n as u64;
+            if total > cap {
+                return Err(io::Error::other(format!(
+                    "{} grew while being archived",
+                    s.path.display()
+                ))
+                .into());
+            }
+            builder.write_all(&chunk[..n])?;
+        }
+        tracker.add_bytes(total, &s.name);
         Ok(builder.finish()?)
     })
 }
@@ -500,6 +570,7 @@ impl Creator<'_, '_> {
 
     /// Compresses a run of small files on `threads` workers, then appends them in order.
     fn flush_batch(&mut self, batch: &mut Vec<SourceEntry>, threads: usize) -> Result<()> {
+        let cap = exp_small();
         let slots: Vec<Mutex<Option<Result<PreparedZipFile>>>> =
             batch.iter().map(|_| Mutex::new(None)).collect();
         let next = AtomicUsize::new(0);
@@ -518,7 +589,7 @@ impl Creator<'_, '_> {
                         loop {
                             let i = next.fetch_add(1, Ordering::Relaxed);
                             let Some(s) = batch.get(i) else { break };
-                            let done = compress_small(s, plan, opts, tracker);
+                            let done = compress_small(s, plan, opts, tracker, cap);
                             *slots[i].lock().unwrap_or_else(PoisonError::into_inner) = Some(done);
                         }
                     });
@@ -582,7 +653,7 @@ impl ArchiveFormat for ZipFormat {
         } else {
             workers.pool.min(plan.files.len()).max(1)
         };
-        run_workers(&shared, &plan, &session, threads, secret, &workers)?;
+        run_workers(&shared, opts, &plan, &session, threads, secret, &workers)?;
 
         for link in &plan.links {
             let name = plan.name(link)?;
@@ -626,6 +697,8 @@ impl ArchiveFormat for ZipFormat {
         };
         let workers = opts.workers();
         let mut batch: Vec<SourceEntry> = Vec::new();
+        let (small, budget) = (exp_small(), exp_budget());
+        let mut batch_bytes = 0u64;
         // The zip writer keeps a central-directory record per entry until it finishes.
         let mut meta = MetaBudget::new(opts.limits.max_metadata_bytes);
         while let Some(s) = sources.next_entry()? {
@@ -634,16 +707,18 @@ impl ArchiveFormat for ZipFormat {
             // Read afresh for every entry: a batch is the unit a change of limit waits for.
             let threads = workers.active();
             // The zip library cannot encrypt outside a ZipWriter, so encrypted archives are serial.
-            if s.kind == EntryKind::File && s.size <= SMALL_FILE && threads > 1 && secret.is_none()
-            {
+            if s.kind == EntryKind::File && s.size <= small && threads > 1 && secret.is_none() {
+                batch_bytes += s.size;
                 batch.push(s);
-                if batch.len() >= threads * 16 {
+                if batch.len() >= exp_batch().unwrap_or(threads * 16) || batch_bytes >= budget {
                     c.flush_batch(&mut batch, threads)?;
+                    batch_bytes = 0;
                 }
                 continue;
             }
             // Keep archive order: whatever is queued goes in before this entry.
             c.flush_batch(&mut batch, threads)?;
+            batch_bytes = 0;
             if s.kind == EntryKind::File {
                 stats::time_file(opts.stats.as_ref(), || c.add_streamed(&s))?;
             } else {

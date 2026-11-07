@@ -1,6 +1,6 @@
 # 0011: Better evidence, bounded metadata memory, zip upgrade as an A/B
 
-- Status: Accepted (Parts 1 and 2; Part 3 is added by the commit that does it)
+- Status: Accepted (Parts 1 to 3)
 - Date: 2026-11-05
 - Changes: section 5 (engine) of [`../DECISIONS.md`](../DECISIONS.md); builds on [0010](0010-measure-first-adaptive-io.md)
 
@@ -104,3 +104,33 @@ Consequences and limits:
 - The walker is a second thread; it shows in `--stats` thread-seconds as its own lane. Time it
   spends waiting for a full queue is classed as idle and is not counted anywhere.
 - Not measured: spinning disks, cold cache, Windows, macOS, Android.
+
+## Part 3: the zip crate upgrade, A/B
+
+Decisions:
+
+- **`zip` stays pinned at `=9.1.3`.** 9.4.1 (newest, one to two days old when tested) was run
+  on identical inputs in branch `zip-upgrade-ab` (not merged): same archives (plain ones byte
+  for byte), verified by 7-Zip, Python and extraction compared with `diff -r`; no speed gain
+  (within 1%, Deflate +1.5% to +3.8% on two workloads), no memory change, and a second
+  `lzma-rust2` in the lock file. All tests, including `tests/security.rs`, pass on it.
+- **The `rayon` feature and upstream's `par_append_*` / `par_extract` are not used.** They are
+  the primitive Zstar already uses plus rayon, and they break four rules: memory (a 4 GiB file
+  peaks at 2.4 GiB against 14 MiB), cancellation and live control, streaming (they take the
+  whole list), and deterministic order (completion order; output is not identical between
+  runs). They cannot be wrapped. The prepared-entry API cannot encrypt, so encrypted creation
+  stays serial.
+- **Measured in Zstar's own code, not changed here**: creation of mixed sizes compresses in
+  waves that keep about one thread busy (w3 Deflate 15.4 s against 8.7 s for upstream's
+  continuous pipeline); encrypted creation of 10,000 small files takes 10.2 s against 0.61 s
+  plain on one core; a 1 MiB read buffer for zip extraction doubles the cost on small entries;
+  independent readers per worker are worth 2 to 6% on a warm cache.
+
+Numbers, method and what was not measured: [zip-upgrade.md](../reports/zip-upgrade.md).
+
+Consequences: no code or dependency change from this part. Three follow-ups need the owner's
+decision: a continuous ordered-window pipeline for zip creation (the zip counterpart of the
+postponed pargz pipeline), writing AES entries ourselves to parallelise encryption (a format
+and security decision), and a reader factory for zip extraction (only with HDD or network
+numbers). Not measured: HDD, NVMe, cold cache, Windows, macOS, Android, Zstd in any third-party
+reader (7-Zip 23.01 does not support the method).

@@ -241,6 +241,53 @@ counted in the reservation.
 Not measured: HDD, NVMe, cold cache, more than 2 CPUs, Windows, macOS, Android. With only two
 cores the run cannot show how the window scales to many workers.
 
+## Encrypted zip: why it is slow, and 7z for comparison
+
+Cause, checked in the crate source and by measurement. `zip` 9.1.3 `src/aes.rs` derives the key
+of every encrypted entry with `pbkdf2::pbkdf2::<SimpleHmacReset<Sha1>>(password, &salt,
+ITERATION_COUNT = 1000, ..)` on a fresh random salt, into `2 * key_length + 2` = 66 bytes for
+AES-256 (four SHA-1 blocks of PBKDF2 output). The salt differs per entry, so nothing can be
+cached. The same call in a scratch program with the same crate versions (pbkdf2 0.13.0,
+hmac 0.13.0, sha1 0.11.0, release, LTO) takes 0.950 ms. The hypothesis is confirmed.
+
+| 2-CPU VM, release, warm cache | wall | user CPU |
+|---|---|---|
+| 10,000 empty files, zip store, plain | 0.05 s | 0.02 s |
+| 10,000 empty files, zip store, AES | 9.6 s | 9.5 s |
+| 10,000 x 4 KiB, zip deflate -l1, plain | 0.28 s | 0.47 s |
+| 10,000 x 4 KiB, zip deflate -l1, AES | 10.0 to 10.3 s | 9.9 to 10.1 s |
+| 10,000 x 4 KiB, zip deflate (default level), plain / AES | 0.6 s / 10.7 s | 0.9 s / 10.5 s |
+| 10,000 x 4 KiB, Zstar 7z -l1, plain / AES | 1.16 s / 1.30 s | 1.24 s / 1.36 s |
+| 10,000 x 4 KiB, 7-Zip 23.01 7z -mx1, plain / AES | 1.60 s / 1.63 s | 2.8 s / 2.9 s |
+| 10,000 x 4 KiB, 7-Zip 23.01 zip -mx1, plain / AES | 0.85 s / 3.08 s | 1.1 s / 5.6 s |
+
+Empty files cost as much as 4 KiB ones, so the time is the derivation, not the data: about
+0.96 ms per entry (10,000 entries = 9.6 s), on one thread because encrypted zip is serial. 7z
+derives one key for the archive, so its encrypted run is within 12% of the plain one. 7-Zip's
+own zip writer pays about 0.22 ms of wall time per entry on two threads (3.08 s against 0.85 s),
+roughly 2.4 times less than the crate; why was not investigated, and a faster implementation
+was not tried (no own crypto, as decided).
+
+One 4 GiB file (a few entries, so the derivation does not show):
+
+| | wall | user CPU | sys CPU |
+|---|---|---|---|
+| Zstar zip store, plain | 5.8 s | 0.1 s | 2.5 s |
+| Zstar zip store, AES | 9.6 s | 5.5 s | 2.2 s |
+| 7-Zip 23.01 zip store, plain / AES | 7.7 s / 9.9 s | 2.7 s / 5.8 s | 2.3 s / 2.4 s |
+| 7-Zip 23.01 7z store (-mx0), plain / AES | 9.1 s / 12.7 s | 2.6 s / 7.4 s | 2.4 s / 3.1 s |
+| Zstar 7z -l0 (LZMA2, not a store), plain / AES | 139.8 s / 167.6 s | 273.8 s / 293.4 s | 2.6 s / 36.8 s |
+
+AES on the data costs about 1.4 s of CPU per GiB in Zstar zip and is on par with 7-Zip, so for
+big files encrypted zip is fine. Zstar's 7z at `-l0` is LZMA2 and not comparable with a store;
+its AES overhead there (+28 s) is small against the compression, but the sys time jumped for
+that single run and was not repeated. Zstar's 7z compression is not part of this task.
+
+Conclusion for users (README): encrypted zip with many small files costs about 1 ms per entry;
+7z is the faster alternative, measured above. One run per cell for the 4 GiB rows; two to four for
+the small-file rows. Not measured: HDD, NVMe, Windows, macOS, a CPU without SHA extensions
+(this one has `sha_ni`).
+
 ## Recommendation and owner decisions
 
 Decided by the owner after this report (8 Nov 2026):

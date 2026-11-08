@@ -47,6 +47,19 @@ Every key is defined in the module docs of
 [docs/reports/io-measurement.md](docs/reports/io-measurement.md) and what the counters cost in
 [docs/reports/stats-overhead-v2.md](docs/reports/stats-overhead-v2.md).
 
+## Encrypted zip is slow with many small files
+
+Zip encryption (WinZip AES-256) derives a new key for every entry: PBKDF2-HMAC-SHA1 with 1,000
+iterations and a random salt, measured at 0.95 ms per entry on the test machine whatever the
+file size, and it is not shared between entries. So 10,000 files of 4 KiB take about 10 s
+encrypted against 0.3 to 0.6 s plain, and 10,000 empty files take 9.6 s. The data itself is
+not the cost: one 4 GiB file stored takes 9.6 s with AES against 5.8 s without. Encrypted
+archives are written on one thread.
+
+For many small files the 7z format is the faster choice: it derives the key once per archive
+(10,000 x 4 KiB: 1.3 s encrypted against 1.2 s plain). For a few large files the two formats
+are alike. Numbers and method: [docs/reports/zip-upgrade.md](docs/reports/zip-upgrade.md).
+
 ## Limits on huge trees
 
 Creating an archive walks the source tree on a helper thread and hands the entries to the

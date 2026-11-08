@@ -1,6 +1,6 @@
 # 0011: Better evidence, bounded metadata memory, zip upgrade as an A/B
 
-- Status: Accepted (Parts 1 to 3)
+- Status: Accepted (Parts 1 to 3 and the addendum of 8 Nov 2026)
 - Date: 2026-11-05
 - Changes: section 5 (engine) of [`../DECISIONS.md`](../DECISIONS.md); builds on [0010](0010-measure-first-adaptive-io.md)
 
@@ -134,3 +134,47 @@ postponed pargz pipeline), writing AES entries ourselves to parallelise encrypti
 and security decision), and a reader factory for zip extraction (only with HDD or network
 numbers). Not measured: HDD, NVMe, cold cache, Windows, macOS, Android, Zstd in any third-party
 reader (7-Zip 23.01 does not support the method).
+
+## Addendum (8 Nov 2026): decisions on the results of Parts 1 to 3
+
+Owner-approved, and implemented in the commits after `4c0ea47`.
+
+1. **`zip` stays at `=9.1.3`**, no `rayon`, branch `zip-upgrade-ab` kept for reference only.
+   A larger small-file limit on its own was measured and not shipped: it only pays with the
+   pipeline below.
+2. **A continuous ordered pipeline replaces the waves in zip creation.**
+   `crates/core/src/pipeline.rs` is generic over job and result type (no zip code), so the
+   pargz pipeline can use it later; pargz is not changed. Workers take the next entry as soon
+   as they are free, the calling thread appends results in source order, and the source is not
+   read further once the reserved bytes reach the budget (`max_memory_bytes / 8`, 8 to 128 MiB;
+   128 MiB by default). A job reserves `2 * size + 16 KiB` and shrinks to what it keeps.
+   Files up to `min(32 MiB, budget / 4)` are compressed whole on a worker; bigger ones still
+   stream on the calling thread and are never held, and a big file at the head lets the source
+   run ahead first. Order, `.part` handling, `Control` (live profile switch, thread limit read
+   per job, priority), stats (queue occupancy, wait classes), cancellation (polled every 10 ms
+   by a waiting thread and between 1 MiB pieces in a worker) and the limit checks are kept.
+   Encrypted archives and one-thread runs keep the serial path. Entries above 1 MiB are fed to
+   the compressor in `io_buffer()` pieces, because Deflate output depends on the write
+   boundaries: this keeps the archive byte for byte equal to the streaming path.
+   Result (2-CPU VM): mixed 851 MiB 15.6 s to 11.4 s with 17 to 140 MiB peak RSS; 10,000 x
+   4 KiB 0.66 to 0.53 s; 100,000 x 64 B 2.35 to 1.84 s; 1,000,000 x 64 B 26.0 to 20.8 s;
+   one 4 GiB file unchanged (35.1 s). The 8.7 s of the upstream path is not reached: three
+   adjacent files of over 100 MiB stream on one thread (6.2 s with a single busy thread), and
+   raising the budget to 512 MiB only gets to 10.9 s. Costs to know: the calling thread is a
+   thread of its own, so up to `threads + 1` are runnable while it streams a big file; the
+   encoder state of each worker (a few MiB) is not in the reservation.
+3. **Encrypted zip is not sped up with new crypto.** Cause confirmed: PBKDF2-HMAC-SHA1, 1,000
+   iterations, per entry, 0.95 ms (10,000 empty files: 9.6 s). The README says so and points
+   to 7z (one derivation per archive: 10,000 x 4 KiB in 1.3 s encrypted). Large files are
+   unaffected: AES costs about 1.4 s of CPU per GiB, on par with 7-Zip.
+4. **Default limits.** `max_path_bytes` (32 KiB) and `max_depth` (1,024) unchanged.
+   `max_metadata_bytes` is now optional and follows `max_memory_bytes`; `Limits::for_ram`
+   (used by the Linux command line through `zstar_sys::total_memory`) gives devices under
+   4 GiB a quarter of the RAM as memory and metadata limit and a proportional `max_entries`.
+   The entry limit is kept at 10,000,000 on the defaults and which of the two trips first is
+   documented (README): writers meet the metadata limit first; the zip extraction plan meets
+   the entry limit first only for names under about 75 bytes. The error always names the
+   limit. Windows and macOS do not report their RAM yet and use the defaults.
+
+Not measured: HDD, NVMe, cold cache, more than two CPUs, Windows, macOS, Android; the
+`for_ram` values were checked by tests, not on a 2 to 3 GiB device.

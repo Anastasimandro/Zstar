@@ -60,19 +60,36 @@ For many small files the 7z format is the faster choice: it derives the key once
 (10,000 x 4 KiB: 1.3 s encrypted against 1.2 s plain). For a few large files the two formats
 are alike. Numbers and method: [docs/reports/zip-upgrade.md](docs/reports/zip-upgrade.md).
 
-## Limits on huge trees
+## Limits
 
 Creating an archive walks the source tree on a helper thread and hands the entries to the
 writer through a bounded queue, so nothing holds the whole tree. Siblings are still sorted per
 directory, parents come before children and the archives are byte for byte the same as before.
 Zip extraction keeps its full security check before the first write, but stores the plan
-compactly (each name once plus 24 bytes per entry). Four limits apply to both, are errors when
-exceeded (never a skipped check) and can be raised or removed with `--no-limits`:
+compactly (each name once plus 24 bytes per entry). These limits apply, are errors when
+exceeded (never a skipped check; the message names the limit and how to raise it) and can be
+raised or removed with `--no-limits`. The same keys exist under `[limits]` in the config file.
 
-- `--max-entries` (default 10,000,000 entries), `--max-path` (default 32 KiB per entry name),
-  `--max-depth` (default 1,024 components) and `--max-metadata` (default 1 GiB of metadata held
-  in memory: directory listings of the walk, the zip plan, and what the zip and 7z writers keep
-  until they finish). The same keys exist under `[limits]` in the config file.
+| flag | default | what it stops |
+|---|---|---|
+| `--max-size` | 64 GiB | total uncompressed bytes |
+| `--max-entries` | 10,000,000 (less on small devices) | number of entries |
+| `--max-ratio` | 500 | output:archive ratio, past 256 MiB of output (0 = off) |
+| `--max-memory` | 1 GiB | memory a decoder asks for (xz / 7z dictionary) |
+| `--max-path` | 32 KiB | length of one entry name |
+| `--max-depth` | 1,024 | components in one entry name |
+| `--max-metadata` | same as `--max-memory` | metadata held in memory: walk listings, the zip plan, what the zip and 7z writers keep per entry |
+
+- The metadata limit follows the memory limit unless it is set, so one number sizes both.
+  On Linux the command line also asks the OS for the RAM: below 4 GiB the memory limit (and
+  with it the metadata limit) is a quarter of it, never under 64 MiB, and the entry limit
+  shrinks in proportion: a 2 GiB device gets 512 MiB and 5,000,000 entries, a 3 GiB one 768
+  MiB and 7,500,000. Other systems use the defaults above until they report their RAM; the
+  Android app is meant to call `Limits::for_ram`.
+- Which of entries and metadata trips first: writers are charged the name plus 128 bytes per
+  entry, so with the defaults they meet the metadata limit before 10 million entries (about
+  4.7 million entries of 100-byte names). The zip extraction plan is charged the name plus 32
+  bytes, so it meets the entry limit first only when names average under about 75 bytes.
 - While a tree is still being walked the progress total is unknown (`None`); it becomes known
   when the walk ends.
 

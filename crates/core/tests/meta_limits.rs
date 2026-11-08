@@ -111,10 +111,10 @@ fn name_depth_and_metadata_limits_on_creation() {
     zip(&limited(|l| l.max_path_bytes = 64)).unwrap();
     // Walk listings and the zip writer's records both count against the metadata limit.
     expect_limit(
-        zip(&limited(|l| l.max_metadata_bytes = 100)),
+        zip(&limited(|l| l.max_metadata_bytes = Some(100))),
         LimitKind::Metadata,
     );
-    zip(&limited(|l| l.max_metadata_bytes = 1 << 20)).unwrap();
+    zip(&limited(|l| l.max_metadata_bytes = Some(1 << 20))).unwrap();
     // `Limits::unlimited` turns every one of them off.
     let mut opts = limited(|_| {});
     opts.limits = Limits::unlimited();
@@ -200,7 +200,7 @@ fn zip_extraction_limits_the_metadata_the_plan_holds() {
         extract(
             &mut Cursor::new(bytes.clone()),
             &dest,
-            &limited(|l| l.max_metadata_bytes = 2000),
+            &limited(|l| l.max_metadata_bytes = Some(2000)),
         ),
         LimitKind::Metadata,
     );
@@ -253,4 +253,80 @@ fn case_only_collisions_are_still_found_with_compact_keys() {
 
 fn assert_exists(p: &Path) {
     assert!(p.exists(), "{} should exist", p.display());
+}
+
+#[test]
+fn the_metadata_allowance_follows_the_memory_limit_unless_it_is_set() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    write(&src.join("a/file-with-a-name.txt"), b"x");
+    let out = tmp.path().join("o.zip");
+    let zip = |o: &Options| create_file(Format::Zip, std::slice::from_ref(&src), &out, o);
+
+    // Nothing set: the memory limit is the metadata limit, so a tiny one refuses the tree.
+    assert_eq!(
+        Limits::default().metadata_limit(),
+        Limits::default().max_memory_bytes
+    );
+    expect_limit(
+        zip(&limited(|l| l.max_memory_bytes = 100)),
+        LimitKind::Metadata,
+    );
+    // An explicit metadata limit wins over the memory limit, up or down.
+    zip(&limited(|l| {
+        l.max_memory_bytes = 100;
+        l.max_metadata_bytes = Some(1 << 20);
+    }))
+    .unwrap();
+    expect_limit(
+        zip(&limited(|l| l.max_metadata_bytes = Some(100))),
+        LimitKind::Metadata,
+    );
+    // No limits means no metadata limit either.
+    assert_eq!(Limits::unlimited().metadata_limit(), u64::MAX);
+}
+
+#[test]
+fn small_devices_get_smaller_defaults_and_big_ones_the_usual_ones() {
+    const GIB: u64 = 1 << 30;
+    let usual = Limits::default();
+    assert_eq!(
+        (usual.max_memory_bytes, usual.max_entries),
+        (GIB, 10_000_000)
+    );
+    for ram in [4 * GIB, 8 * GIB, 64 * GIB] {
+        let l = Limits::for_ram(ram);
+        assert_eq!(l.max_memory_bytes, usual.max_memory_bytes);
+        assert_eq!(l.max_entries, usual.max_entries);
+        assert_eq!(l.metadata_limit(), usual.metadata_limit());
+    }
+    // 2 and 3 GiB phones: a quarter of the RAM, entries in proportion.
+    let two = Limits::for_ram(2 * GIB);
+    assert_eq!(two.metadata_limit(), 512 << 20);
+    assert_eq!(two.max_entries, 5_000_000);
+    let three = Limits::for_ram(3 * GIB);
+    assert_eq!(three.metadata_limit(), 768 << 20);
+    assert_eq!(three.max_entries, 7_500_000);
+    // Never below a floor, whatever the figure; the other limits are untouched.
+    let tiny = Limits::for_ram(0);
+    assert_eq!(tiny.max_memory_bytes, 64 << 20);
+    assert_eq!(tiny.max_depth, usual.max_depth);
+    assert_eq!(tiny.max_path_bytes, usual.max_path_bytes);
+    assert_eq!(tiny.max_total_bytes, usual.max_total_bytes);
+}
+
+#[test]
+fn every_limit_error_names_its_key_and_how_to_raise_it() {
+    for (kind, key) in [
+        (LimitKind::TotalSize, "max_total_bytes"),
+        (LimitKind::Entries, "max_entries"),
+        (LimitKind::Ratio, "max_ratio"),
+        (LimitKind::Memory, "max_memory_bytes"),
+        (LimitKind::PathLength, "max_path_bytes"),
+        (LimitKind::Depth, "max_depth"),
+        (LimitKind::Metadata, "max_metadata_bytes"),
+    ] {
+        let text = Error::LimitExceeded(kind).to_string();
+        assert!(text.contains(key), "{kind:?}: {text}");
+    }
 }

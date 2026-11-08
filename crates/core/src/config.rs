@@ -15,7 +15,7 @@
 //! max_memory_bytes = "1G"    # decoder dictionary size
 //! max_path_bytes   = 32_768  # longest entry name, in bytes
 //! max_depth        = 1024    # deepest entry, in name components
-//! max_metadata_bytes = "1G"  # names and listings held in memory
+//! max_metadata_bytes = "1G"  # names and listings held in memory (default: max_memory_bytes)
 //! ```
 
 use crate::error::{Error, Result};
@@ -77,7 +77,7 @@ pub fn apply_toml(text: &str, opts: &mut Options) -> Result<()> {
             ("limits", "max_memory_bytes") => limits.max_memory_bytes = number()?,
             ("limits", "max_path_bytes") => limits.max_path_bytes = number()?,
             ("limits", "max_depth") => limits.max_depth = number()?,
-            ("limits", "max_metadata_bytes") => limits.max_metadata_bytes = number()?,
+            ("limits", "max_metadata_bytes") => limits.max_metadata_bytes = Some(number()?),
             _ => return Err(bad(n, format!("unknown key `{key}`"))),
         }
     }

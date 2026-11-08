@@ -221,7 +221,7 @@ impl Plan {
             entries,
             case_collision: false,
         };
-        let mut meta = MetaBudget::new(opts.limits.max_metadata_bytes);
+        let mut meta = MetaBudget::new(opts.limits.metadata_limit());
         let state = RandomState::new();
         let mut keys: Vec<u64> = Vec::new();
         let mut scratch = String::new();
@@ -619,7 +619,7 @@ impl ArchiveFormat for ZipFormat {
             max_items: WINDOW_ENTRIES,
         };
         // The zip writer keeps a central-directory record per entry until it finishes.
-        let mut meta = MetaBudget::new(opts.limits.max_metadata_bytes);
+        let mut meta = MetaBudget::new(opts.limits.metadata_limit());
         let source = || {
             let Some(s) = sources.next_entry()? else {
                 return Ok(None);

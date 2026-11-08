@@ -305,7 +305,7 @@ impl ArchiveFormat for SevenZFormat {
         // entry until it writes the header, so this format reads the whole list first: a
         // streaming copy could not be written out before the walk ended anyway.
         let mut list = Vec::new();
-        let mut meta = MetaBudget::new(opts.limits.max_metadata_bytes);
+        let mut meta = MetaBudget::new(opts.limits.metadata_limit());
         while let Some(s) = sources.next_entry()? {
             meta.charge(&s)?;
             list.push(s);

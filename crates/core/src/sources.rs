@@ -165,7 +165,7 @@ impl SourceStream for Listed<'_> {
 }
 
 /// Meters the metadata a format keeps in memory until it ends, against
-/// [`Limits::max_metadata_bytes`]. Exceeding it is an error, never a skipped entry.
+/// [`Limits::metadata_limit`]. Exceeding it is an error, never a skipped entry.
 #[cfg_attr(not(any(feature = "zip", feature = "sevenz")), allow(dead_code))]
 pub(crate) struct MetaBudget {
     used: u64,
@@ -394,7 +394,7 @@ impl<'a> SourceWalker<'a> {
             next: 0,
         };
         self.pending_bytes = self.pending_bytes.saturating_add(frame.bytes());
-        if self.pending_bytes > self.limits.max_metadata_bytes {
+        if self.pending_bytes > self.limits.metadata_limit() {
             return Err(Error::LimitExceeded(LimitKind::Metadata));
         }
         self.stack.push(frame);
@@ -668,7 +668,7 @@ mod tests {
             Err(Error::LimitExceeded(LimitKind::PathLength))
         ));
         assert!(matches!(
-            walk(|l| l.max_metadata_bytes = 8),
+            walk(|l| l.max_metadata_bytes = Some(8)),
             Err(Error::LimitExceeded(LimitKind::Metadata))
         ));
         assert!(walk(|_| {}).is_ok());

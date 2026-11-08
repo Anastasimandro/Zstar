@@ -55,8 +55,10 @@ pub struct Limits {
     /// Most metadata one operation may hold in memory: the directory listings of the walk
     /// over the sources, the compact plan of a zip extraction, and what zip and 7z writers
     /// keep per entry until they finish (estimated as name, link target and 128 bytes).
-    /// `u64::MAX` disables the check.
-    pub max_metadata_bytes: u64,
+    /// `None` (the default) follows [`max_memory_bytes`](Self::max_memory_bytes), so one
+    /// number sizes both; `Some(u64::MAX)` disables the check. Read it with
+    /// [`metadata_limit`](Self::metadata_limit).
+    pub max_metadata_bytes: Option<u64>,
 }
 
 impl Limits {
@@ -70,7 +72,37 @@ impl Limits {
             max_memory_bytes: u64::MAX,
             max_path_bytes: u64::MAX,
             max_depth: u64::MAX,
-            max_metadata_bytes: u64::MAX,
+            max_metadata_bytes: Some(u64::MAX),
+        }
+    }
+
+    /// The metadata allowance in force: the explicit limit, or the memory limit.
+    pub const fn metadata_limit(&self) -> u64 {
+        match self.max_metadata_bytes {
+            Some(n) => n,
+            None => self.max_memory_bytes,
+        }
+    }
+
+    /// Defaults for a device with `ram` bytes of memory, for platforms that know it (the
+    /// command line on Linux, the Android app). Below 4 GiB the memory limit, and with it
+    /// the metadata allowance, is a quarter of the RAM (a 2 GiB phone gets 512 MiB, a 3 GiB
+    /// one 768 MiB, never under 64 MiB) and the entry limit shrinks in proportion. From 4 GiB
+    /// up the result is [`Limits::default`].
+    ///
+    /// Which of the entry and metadata limits trips first depends on the operation. Writers
+    /// are charged name + 128 bytes per entry, so on the defaults (1 GiB) they meet the
+    /// metadata limit before 10 million entries, at about 4.7 million for 100-byte names. The
+    /// plan of a zip extraction is charged name + 32 bytes, so it meets the entry limit first
+    /// only when names average under about 75 bytes. Either way the error names the limit.
+    pub fn for_ram(ram: u64) -> Self {
+        let base = Limits::default();
+        let memory = (ram / 4).clamp(64 << 20, base.max_memory_bytes);
+        Limits {
+            max_memory_bytes: memory,
+            max_entries: (u128::from(base.max_entries) * u128::from(memory)
+                / u128::from(base.max_memory_bytes)) as u64,
+            ..base
         }
     }
 
@@ -96,7 +128,7 @@ impl Default for Limits {
             max_memory_bytes: 1 << 30,
             max_path_bytes: 32 << 10,
             max_depth: 1024,
-            max_metadata_bytes: 1 << 30,
+            max_metadata_bytes: None,
         }
     }
 }

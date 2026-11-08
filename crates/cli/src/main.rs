@@ -63,14 +63,15 @@ compress:
 extract:
     -o, --output <DIR>     destination directory (default: current directory)
         --max-size <SIZE>  stop after this much output, e.g. 10G (default 64G)
-        --max-entries <N>  stop after this many entries (default 10000000)
+        --max-entries <N>  stop after this many entries (default 10000000, less with under 4G of RAM)
         --max-ratio <N>    stop above this output:archive ratio, 0 = off (default 500)
         --max-memory <SIZE>  refuse decoders asking for more memory (xz/7z dictionary),
-                           e.g. 512M (default 1G)
+                           e.g. 512M (default 1G, a quarter of the RAM
+                           below 4G on Linux)
         --max-path <N>     refuse entry names longer than N bytes (default 32768)
         --max-depth <N>    refuse entries nested deeper than N components (default 1024)
         --max-metadata <SIZE>  refuse to hold more than this much entry metadata in memory
-                           (names, listings), e.g. 512M (default 1G)
+                           (names, listings), e.g. 512M (default: --max-memory)
         --no-limits        disable all bomb protection (trusted archives only)
 
 The archive format is detected from its contents, never from its name, except for
@@ -142,6 +143,10 @@ fn load_config(explicit: Option<&std::path::Path>, opts: &mut Options) -> Result
 
 fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Cli>, String> {
     let mut opts = Options::default();
+    // Small devices get smaller defaults; the config file and flags below still override them.
+    if let Some(ram) = zstar_sys::total_memory() {
+        opts.limits = zstar_core::Limits::for_ram(ram);
+    }
     let mut command: Option<String> = None;
     let mut positional: Vec<PathBuf> = Vec::new();
     let mut output = PathBuf::from(".");
@@ -233,7 +238,7 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Cli>, String
             }
             Long("max-metadata") => {
                 let v: String = p.value().map_err(e)?.parse().map_err(e)?;
-                opts.limits.max_metadata_bytes = parse_size(&v)?;
+                opts.limits.max_metadata_bytes = Some(parse_size(&v)?);
             }
             Long("password-file") => {
                 let path: PathBuf = p.value().map_err(e)?.into();

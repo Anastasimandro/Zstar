@@ -121,6 +121,15 @@ pub fn detect(path: &Path) -> Detection {
     }
 }
 
+/// Total physical memory in bytes, where the OS says so cheaply: Linux and Android read
+/// `/proc/meminfo`. `None` elsewhere, and when the figure cannot be read.
+pub fn total_memory() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    return linux::total_memory();
+    #[cfg(not(target_os = "linux"))]
+    None
+}
+
 /// Opens `path` for reading and tells the OS the file will be read from start to end
 /// (Windows: `FILE_FLAG_SEQUENTIAL_SCAN`; Linux: `posix_fadvise(POSIX_FADV_SEQUENTIAL)`; other
 /// systems: a plain open). The hint is best effort: if it cannot be given the file is opened

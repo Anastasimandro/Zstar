@@ -181,6 +181,66 @@ reader available); `par_extract` (rejected by the rules, not run); the `ZipItera
 a continuous creation pipeline (not built: see below); PBKDF2 as the cause of slow encryption
 (inferred from CPU time and entry count, not profiled).
 
+## Continuous pipeline (zip creation)
+
+`crates/core/src/pipeline.rs` is a generic, ordered pipeline with a byte budget; zip creation
+uses it instead of waves. The calling thread reads the source and writes the archive; workers
+take the next job as soon as they are free; results are written in source order. What is in
+flight is reserved in bytes (`2 * size + 16 KiB` per job, shrunk to what the result keeps) and
+the source is not read further when the budget is spent. Budget = `max_memory_bytes / 8`,
+clamped to 8..128 MiB (default 128 MiB); files up to `min(32 MiB, budget / 4)` are compressed
+whole on a worker, bigger ones stream on the calling thread as before and are never held. A
+big file at the head lets the source run ahead first, so the workers have work meanwhile.
+Encrypted archives and one-thread runs keep the serial path (an entry goes through the sink).
+
+Bytes: identical to the previous build (`cmp`) for Deflate and Zstd on 10,000 x 4 KiB, the
+mixed set and 100,000 x 64 B; `threads_do_not_change_the_archive_bytes_of_a_mixed_tree` checks 1,
+2 and 4 threads on sizes around the 1 MiB write-piece threshold. Tests with a deliberately slow
+sink and slow jobs prove the budget holds and the order is kept (`pipeline::tests`).
+
+Measured on the 2-CPU VM, release builds, one operation per process, warm cache, before/after
+interleaved, Deflate unless noted. Medians of the runs shown in the logs.
+
+| workload | wall before | wall after | peak RSS before / after |
+|---|---|---|---|
+| mixed 851 MiB, 2173 files (w3) | 15.6 s | 11.4 s (-27%) | 17 / 140 MiB |
+| 10,000 x 4 KiB (w1) | 0.66 s | 0.53 s | 14 / 14 MiB |
+| 100,000 x 64 B | 2.35 s | 1.84 s | 26 / 27 MiB |
+| 1,000,000 x 64 B | 26.0 s | 20.8 s | 242 / 242 MiB |
+| one 4 GiB file, Zstd | 35.1 s | 35.1 s | 14 / 14 MiB |
+
+The 1M row is the median of the two warm runs (the first pair, cold, was 36.5 / 25.7 s). The
+first 4 GiB "before" run (301 s) overlapped with generating files and is discarded.
+
+Mixed set, CPU use (`/proc` per-thread sampling, 50 ms slices; "before" threads are short-lived
+and not sampled, so its figure is user+sys over wall from `wait4`):
+
+| | cores busy on average | time with exactly one thread busy | with two | per-thread CPU / wall |
+|---|---|---|---|---|
+| before | 1.06 | ~14 s of 15.6 | 0 | n/a |
+| after | 1.48 | 6.2 s of 12.1 | 4.9 s | 0.57 / 0.42 / 0.40 |
+
+All of the remaining single-thread time is the three adjacent files of 121, 102 and 114 MiB
+(339 MiB, about 6.4 s of one core): a zip entry is one compression stream and, with memory
+bounded, it cannot be held and compressed elsewhere. The source runs ahead by one budget while
+the first of them streams, which covers part of the first one only. The 8.7 s figure of the
+upstream parallel path is not reached (11.4 s) and is not reachable at this memory: a bigger
+budget buys time slowly.
+
+| budget (`--max-memory` / 8) | wall (2 runs) | peak RSS |
+|---|---|---|
+| 64 MiB | 12.5 / 13.3 s | 74 / 78 MiB |
+| 128 MiB (default) | 12.0 / 12.3 s | 136 / 161 MiB |
+| 256 MiB | 11.5 / 11.4 s | 210 / 196 MiB |
+| 512 MiB | 10.9 / 10.9 s | 252 / 288 MiB |
+
+(Scratch build with the 128 MiB cap lifted, same code; the default was left at 128 MiB.) RSS
+follows the budget: it is the memory bound. Encoder state per worker (a few MiB) is not
+counted in the reservation.
+
+Not measured: HDD, NVMe, cold cache, more than 2 CPUs, Windows, macOS, Android. With only two
+cores the run cannot show how the window scales to many workers.
+
 ## Recommendation and owner decisions
 
 Decided by the owner after this report (8 Nov 2026):
@@ -189,7 +249,7 @@ Decided by the owner after this report (8 Nov 2026):
    reference and is not merged (it carries the new dependency and the environment switches).
 2. **The gain is in Zstar's own pipeline.** A continuous ordered window replaces the waves in
    zip creation, as a reusable component, with in-flight memory bounded in bytes. Results:
-   see "Continuous pipeline" below once measured. The small-file limit is not changed on its own.
+   see "Continuous pipeline" above. The small-file limit is not changed on its own.
 3. **Encrypted creation is not fixed with new crypto.** No own AES, no fork. Cause and numbers
    for the slowness, and the 7z comparison, are measured below.
 4. **Extraction**: independent readers are worth 2 to 6% on a warm cache and cost an API change;

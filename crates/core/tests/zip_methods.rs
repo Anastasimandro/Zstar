@@ -231,3 +231,48 @@ fn a_method_we_do_not_support_fails_with_an_error_and_no_leftovers() {
     assert!(!tmp.path().join("fixture.txt").exists());
     assert!(find_part_files(tmp.path()).is_empty());
 }
+
+/// The parallel window must give the same bytes as the serial path, also for files that
+/// straddle the size where an entry is written to the compressor in pieces, and for a tree
+/// that mixes empty files, directories, small and mid-size files in one order.
+#[test]
+fn threads_do_not_change_the_archive_bytes_of_a_mixed_tree() {
+    for method in [ZipMethod::Deflate, ZipMethod::Zstd] {
+        let tmp = tempfile::tempdir().unwrap();
+        if writable(tmp.path(), method).is_none() {
+            continue;
+        }
+        let src = tmp.path().join("mix");
+        let sizes = [
+            0usize,
+            5,
+            4096,
+            (1 << 20) - 1,
+            1 << 20,
+            (1 << 20) + 1,
+            3 << 20,
+            70,
+            2 << 20,
+            9,
+        ];
+        for (i, n) in sizes.iter().enumerate() {
+            let body: Vec<u8> = (0..*n)
+                .map(|k| ((k * 7 + k / 251 + i) % 251) as u8)
+                .collect();
+            write(&src.join(format!("d{}/f{i}.bin", i % 3)), &body);
+        }
+        let make = |threads: usize, name: &str| {
+            let out = tmp.path().join(name);
+            let opts = Options {
+                zip_method: Some(method),
+                threads,
+                ..Options::default()
+            };
+            create_file(Format::Zip, std::slice::from_ref(&src), &out, &opts).unwrap();
+            fs::read(out).unwrap()
+        };
+        let serial = make(1, "serial.zip");
+        assert_eq!(serial, make(4, "parallel.zip"), "{method:?}");
+        assert_eq!(serial, make(2, "two.zip"), "{method:?}");
+    }
+}

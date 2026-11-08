@@ -21,14 +21,25 @@ use crate::extract::{Session, Summary};
 use crate::format::{ArchiveFormat, EntryInfo, EntryKind, Format, ReadSeek, WriteSeek};
 use crate::formats::stream_len;
 use crate::options::{Options, ZipMethod};
+use crate::pipeline::{self, Item as Slot, Out};
 use crate::progress::Tracker;
 use crate::sources::{MetaBudget, SourceEntry, SourceStream};
 use crate::stats::{self, Class, Stats};
 use crate::timeconv::{Civil, civil_to_system, system_to_civil};
 
 const BUF: usize = 64 * 1024;
-/// Files up to this size are compressed whole, in memory, on worker threads.
-const SMALL_FILE: u64 = 1 << 20;
+/// Prepared entries up to this size are written to the compressor in one call; bigger ones in
+/// `io_buffer()` pieces, exactly as the streaming path reads them, so both give the same bytes.
+const WHOLE_WRITE: u64 = 1 << 20;
+/// The most memory the in-flight compression window may reserve, and the least.
+const WINDOW_MAX: u64 = 128 << 20;
+const WINDOW_MIN: u64 = 8 << 20;
+/// Largest file compressed whole on a worker. Bigger ones stream on the calling thread.
+const SMALL_MAX: u64 = 32 << 20;
+/// Bookkeeping reserved per entry on top of the data: the entry, its header, the result.
+const PER_ENTRY: u64 = 16 << 10;
+/// Most entries between the file walker and the archive writer.
+const WINDOW_ENTRIES: usize = 4096;
 /// Longest symlink target we accept.
 const MAX_LINK_TARGET: u64 = 4096;
 
@@ -430,19 +441,23 @@ fn file_options<'k>(
     o
 }
 
+/// Compresses a whole file on a worker. Returns the entry and the bytes it keeps meanwhile
+/// (an upper bound: the compressed data is not longer than the source, give or take).
 fn compress_small(
     s: &SourceEntry,
     plan: Compression,
     opts: &Options,
     tracker: &Tracker<'_>,
-) -> Result<PreparedZipFile> {
+    cap: u64,
+    piece: usize,
+) -> Result<(PreparedZipFile, u64)> {
     opts.check_cancel()?;
     stats::time_file(opts.stats.as_ref(), || {
         let mut data = Vec::with_capacity(s.size as usize);
         opts.open_source(&s.path)?
-            .take(SMALL_FILE + 1)
+            .take(cap + 1)
             .read_to_end(&mut data)?;
-        if data.len() as u64 > SMALL_FILE {
+        if data.len() as u64 > cap {
             return Err(io::Error::other(format!(
                 "{} grew while being archived",
                 s.path.display()
@@ -450,9 +465,16 @@ fn compress_small(
             .into());
         }
         let mut builder = ZipFileBuilder::new(&s.name, file_options(s, plan, None))?;
-        builder.write_all(&data)?;
+        if data.len() as u64 <= WHOLE_WRITE {
+            builder.write_all(&data)?;
+        } else {
+            for chunk in data.chunks(piece) {
+                opts.check_cancel()?;
+                builder.write_all(chunk)?;
+            }
+        }
         tracker.add_bytes(data.len() as u64, &s.name);
-        Ok(builder.finish()?)
+        Ok((builder.finish()?, data.len() as u64 + PER_ENTRY))
     })
 }
 
@@ -461,7 +483,7 @@ struct Creator<'a, 'o> {
     opts: &'o Options,
     plan: Compression,
     secret: Option<&'o str>,
-    tracker: Tracker<'o>,
+    tracker: &'o Tracker<'o>,
     buf: Vec<u8>,
 }
 
@@ -494,44 +516,6 @@ impl Creator<'_, '_> {
                 self.zw.add_symlink(&s.name, target, options)?;
             }
             _ => {}
-        }
-        Ok(())
-    }
-
-    /// Compresses a run of small files on `threads` workers, then appends them in order.
-    fn flush_batch(&mut self, batch: &mut Vec<SourceEntry>, threads: usize) -> Result<()> {
-        let slots: Vec<Mutex<Option<Result<PreparedZipFile>>>> =
-            batch.iter().map(|_| Mutex::new(None)).collect();
-        let next = AtomicUsize::new(0);
-        let (opts, plan, tracker) = (self.opts, self.plan, &self.tracker);
-        let workers = opts.workers();
-        if let (Some(s), false) = (opts.stats.as_ref(), batch.is_empty()) {
-            s.note_queue(batch.len());
-        }
-        // The calling thread hands the batch out and waits: that is `wait_workers` time.
-        stats::timed(opts.stats.as_ref(), Class::Workers, || {
-            std::thread::scope(|scope| {
-                for _ in 0..threads.min(batch.len()) {
-                    scope.spawn(|| {
-                        let _lane = stats::lane(opts.stats.as_ref());
-                        workers.sync_priority();
-                        loop {
-                            let i = next.fetch_add(1, Ordering::Relaxed);
-                            let Some(s) = batch.get(i) else { break };
-                            let done = compress_small(s, plan, opts, tracker);
-                            *slots[i].lock().unwrap_or_else(PoisonError::into_inner) = Some(done);
-                        }
-                    });
-                }
-            });
-        });
-        for (s, slot) in batch.drain(..).zip(slots) {
-            let prepared = slot
-                .into_inner()
-                .unwrap_or_else(PoisonError::into_inner)
-                .unwrap_or(Err(Error::Cancelled))?;
-            self.zw.add_prepared_file(prepared)?;
-            self.tracker.entry_done(&s.name);
         }
         Ok(())
     }
@@ -616,42 +600,67 @@ impl ArchiveFormat for ZipFormat {
                 "zip encryption is not enabled in this build (feature zip-aes)".into(),
             ));
         }
+        let tracker = Tracker::streaming(opts, sources.totals());
         let mut c = Creator {
             zw: ZipWriter::new(BufWriter::with_capacity(BUF, out)),
             opts,
             plan,
             secret,
-            tracker: Tracker::streaming(opts, sources.totals()),
+            tracker: &tracker,
             buf: vec![0u8; opts.io_buffer()],
         };
         let workers = opts.workers();
-        let mut batch: Vec<SourceEntry> = Vec::new();
+        let piece = opts.io_buffer();
+        let budget = (opts.limits.max_memory_bytes / 8).clamp(WINDOW_MIN, WINDOW_MAX);
+        let small = SMALL_MAX.min(budget / 4);
+        let cfg = pipeline::Config {
+            workers: &workers,
+            budget,
+            max_items: WINDOW_ENTRIES,
+        };
         // The zip writer keeps a central-directory record per entry until it finishes.
         let mut meta = MetaBudget::new(opts.limits.max_metadata_bytes);
-        while let Some(s) = sources.next_entry()? {
-            opts.check_cancel()?;
+        let source = || {
+            let Some(s) = sources.next_entry()? else {
+                return Ok(None);
+            };
             meta.charge(&s)?;
-            // Read afresh for every entry: a batch is the unit a change of limit waits for.
-            let threads = workers.active();
-            // The zip library cannot encrypt outside a ZipWriter, so encrypted archives are serial.
-            if s.kind == EntryKind::File && s.size <= SMALL_FILE && threads > 1 && secret.is_none()
-            {
-                batch.push(s);
-                if batch.len() >= threads * 16 {
-                    c.flush_batch(&mut batch, threads)?;
-                }
-                continue;
-            }
-            // Keep archive order: whatever is queued goes in before this entry.
-            c.flush_batch(&mut batch, threads)?;
-            if s.kind == EntryKind::File {
-                stats::time_file(opts.stats.as_ref(), || c.add_streamed(&s))?;
+            // Read afresh for every entry, so a change of limit reaches the next one. The zip
+            // library cannot encrypt outside a ZipWriter, so encrypted archives are serial.
+            let parallel = secret.is_none() && workers.active() > 1;
+            let file = s.kind == EntryKind::File;
+            Ok(Some(if file && parallel && s.size <= small {
+                let cost = 2 * s.size + PER_ENTRY;
+                Slot::Work { job: s, cost }
             } else {
-                c.add_other(&s)?;
+                // Only a file the sink streams for a long while is worth reading ahead of.
+                Slot::Inline {
+                    defer: file && parallel,
+                    item: s,
+                }
+            }))
+        };
+        let work = |s: SourceEntry| {
+            let (prepared, kept) = compress_small(&s, plan, opts, &tracker, small, piece)?;
+            Ok(((s, prepared), kept))
+        };
+        pipeline::run(&cfg, &|| opts.check_cancel(), source, &work, |out| {
+            match out {
+                Out::Done((s, prepared)) => {
+                    c.zw.add_prepared_file(prepared)?;
+                    c.tracker.entry_done(&s.name);
+                }
+                Out::Inline(s) => {
+                    if s.kind == EntryKind::File {
+                        stats::time_file(opts.stats.as_ref(), || c.add_streamed(&s))?;
+                    } else {
+                        c.add_other(&s)?;
+                    }
+                    c.tracker.entry_done(&s.name);
+                }
             }
-            c.tracker.entry_done(&s.name);
-        }
-        c.flush_batch(&mut batch, workers.active())?;
+            Ok(())
+        })?;
         // Central directory and the last buffered bytes: handed to the OS, not synced.
         stats::timed(opts.stats.as_ref(), Class::Finish, || {
             c.zw.finish()?.flush().map_err(Error::from)

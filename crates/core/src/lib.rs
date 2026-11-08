@@ -39,6 +39,8 @@ mod format;
 mod formats;
 mod options;
 mod path;
+#[cfg(feature = "zip")]
+mod pipeline;
 mod profile;
 mod progress;
 mod sources;

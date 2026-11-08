@@ -84,8 +84,11 @@ impl Limits {
         }
     }
 
-    /// Defaults for a device with `ram` bytes of memory, for platforms that know it (the
-    /// command line on Linux, the Android app). Below 4 GiB the memory limit, and with it
+    /// Defaults for a device with `ram` bytes of memory, as reported by `zstar_sys::ram()`
+    /// (Linux, Android, Windows, macOS; the Android app passes what its `ActivityManager`
+    /// says). Pass the **total** RAM, narrowed by a container or app memory limit, never the
+    /// free RAM: these limits decide whether an operation is refused, and the same archive
+    /// must get the same answer on a busy machine and an idle one. Below 4 GiB the memory limit, and with it
     /// the metadata allowance, is a quarter of the RAM (a 2 GiB phone gets 512 MiB, a 3 GiB
     /// one 768 MiB, never under 64 MiB) and the entry limit shrinks in proportion. From 4 GiB
     /// up the result is [`Limits::default`].

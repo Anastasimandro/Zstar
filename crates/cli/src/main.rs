@@ -144,8 +144,8 @@ fn load_config(explicit: Option<&std::path::Path>, opts: &mut Options) -> Result
 fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Cli>, String> {
     let mut opts = Options::default();
     // Small devices get smaller defaults; the config file and flags below still override them.
-    if let Some(ram) = zstar_sys::total_memory() {
-        opts.limits = zstar_core::Limits::for_ram(ram);
+    if let Some(ram) = zstar_sys::ram() {
+        opts.limits = zstar_core::Limits::for_ram(ram.total);
     }
     let mut command: Option<String> = None;
     let mut positional: Vec<PathBuf> = Vec::new();

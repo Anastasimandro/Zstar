@@ -1,5 +1,5 @@
 //! OS queries for Zstar: which kind of drive holds a path, real thread priority, a
-//! sequential-read hint for source files and a same-device check.
+//! sequential-read hint for source files, a same-device check and how much memory there is.
 //!
 //! This crate is independent of `zstar-core` and is the only place in the workspace that may
 //! contain `unsafe`. Detection never spawns a process, never panics and answers `Unknown`
@@ -16,10 +16,12 @@ use std::sync::Mutex;
 
 #[cfg(target_os = "linux")]
 mod linux;
+mod memory;
 mod rules;
 #[cfg(windows)]
 mod windows;
 
+pub use memory::{Ram, ram};
 pub use rules::combine;
 
 /// The kind of drive a path lives on.
@@ -119,15 +121,6 @@ pub fn detect(path: &Path) -> Detection {
         let _ = path;
         Detection::unknown("drive detection is not implemented on this OS")
     }
-}
-
-/// Total physical memory in bytes, where the OS says so cheaply: Linux and Android read
-/// `/proc/meminfo`. `None` elsewhere, and when the figure cannot be read.
-pub fn total_memory() -> Option<u64> {
-    #[cfg(target_os = "linux")]
-    return linux::total_memory();
-    #[cfg(not(target_os = "linux"))]
-    None
 }
 
 /// Opens `path` for reading and tells the OS the file will be read from start to end

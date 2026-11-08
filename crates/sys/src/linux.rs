@@ -243,17 +243,6 @@ pub(crate) fn set_priority(priority: Priority) -> io::Result<()> {
     }
 }
 
-/// `MemTotal` of `/proc/meminfo`, in bytes.
-pub(crate) fn total_memory() -> Option<u64> {
-    parse_mem_total(&fs::read_to_string("/proc/meminfo").ok()?)
-}
-
-fn parse_mem_total(meminfo: &str) -> Option<u64> {
-    let line = meminfo.lines().find_map(|l| l.strip_prefix("MemTotal:"))?;
-    let kib: u64 = line.trim().strip_suffix("kB")?.trim().parse().ok()?;
-    kib.checked_mul(1024)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -500,13 +489,5 @@ mod tests {
         assert_eq!((major(0x10302), minor(0x10302)), (259, 2));
         assert_eq!((major(0x0010_0823), minor(0x0010_0823)), (8, 0x123));
         assert_eq!((major(0), minor(0)), (0, 0));
-    }
-
-    #[test]
-    fn mem_total_is_read_from_meminfo_text() {
-        let text = "MemTotal:        2048000 kB\nMemFree:          100 kB\n";
-        assert_eq!(parse_mem_total(text), Some(2_048_000 * 1024));
-        assert_eq!(parse_mem_total("MemFree: 5 kB\n"), None);
-        assert_eq!(parse_mem_total("MemTotal: lots kB\n"), None);
     }
 }

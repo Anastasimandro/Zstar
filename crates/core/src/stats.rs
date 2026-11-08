@@ -80,6 +80,10 @@
 //!   Values are the upper edge of a bucket of a log-linear histogram (8 buckets per power of
 //!   two), so they are at most 12.5% above the true percentile. Formats that do not handle
 //!   files one by one (7z creation) report none.
+//! * `mem_budget_bytes` / `mem_encoder_bytes` / `mem_reserved_peak_bytes`: zip creation: the
+//!   memory it was allowed for entries in flight and compressor state together, the part of it
+//!   set aside for the state of the compressors (every worker's and the calling thread's), and
+//!   the most it reserved for entries at once. `n/a` for formats without that pipeline.
 //! * `queue_avg` / `queue_max`: how many items were handed to the workers each time a gzip
 //!   wave or a zip batch started. Sampled at that moment, not time-weighted. Formats without
 //!   a queue report none.
@@ -171,6 +175,9 @@ struct Counters {
     queue_samples: AtomicU64,
     queue_sum: AtomicU64,
     queue_max: AtomicU64,
+    mem_budget: AtomicU64,
+    mem_encoder: AtomicU64,
+    mem_reserved_peak: AtomicU64,
     latency: Histogram,
 }
 
@@ -388,6 +395,12 @@ pub struct StatsSnapshot {
     pub queue_samples: u64,
     pub queue_sum: u64,
     pub queue_max: u64,
+    /// Memory budget of the zip pipeline when the operation started, in bytes (0: none).
+    pub mem_budget: u64,
+    /// Part of it that went to the compressors' own state, in bytes.
+    pub mem_encoder: u64,
+    /// Most bytes the pipeline had reserved at once for entries in flight.
+    pub mem_reserved_peak: u64,
     pub latency_p50: Option<Duration>,
     pub latency_p95: Option<Duration>,
 }
@@ -463,6 +476,9 @@ impl Stats {
             queue_samples: c.queue_samples.load(Relaxed),
             queue_sum: c.queue_sum.load(Relaxed),
             queue_max: c.queue_max.load(Relaxed),
+            mem_budget: c.mem_budget.load(Relaxed),
+            mem_encoder: c.mem_encoder.load(Relaxed),
+            mem_reserved_peak: c.mem_reserved_peak.load(Relaxed),
             latency_p50: c.latency.quantile(0.50),
             latency_p95: c.latency.quantile(0.95),
         }
@@ -503,6 +519,18 @@ impl Stats {
         self.0.queue_samples.fetch_add(1, Relaxed);
         self.0.queue_sum.fetch_add(len as u64, Relaxed);
         self.0.queue_max.fetch_max(len as u64, Relaxed);
+    }
+
+    /// The memory budget of a pipeline and what of it the compressors' state takes.
+    #[cfg_attr(not(feature = "zip"), allow(dead_code))]
+    pub(crate) fn note_memory(&self, budget: u64, encoder: u64) {
+        self.0.mem_budget.fetch_max(budget, Relaxed);
+        self.0.mem_encoder.fetch_max(encoder, Relaxed);
+    }
+
+    #[cfg_attr(not(feature = "zip"), allow(dead_code))]
+    pub(crate) fn note_reserved(&self, bytes: u64) {
+        self.0.mem_reserved_peak.fetch_max(bytes, Relaxed);
     }
 
     #[cfg_attr(not(feature = "gzip"), allow(dead_code))]

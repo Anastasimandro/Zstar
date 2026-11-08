@@ -22,6 +22,7 @@ use crate::format::{ArchiveFormat, EntryInfo, EntryKind, Format, ReadSeek, Write
 use crate::formats::stream_len;
 use crate::options::{Options, ZipMethod};
 use crate::pipeline::{self, Item as Slot, Out};
+use crate::profile::{Profile, memory_share};
 use crate::progress::Tracker;
 use crate::sources::{MetaBudget, SourceEntry, SourceStream};
 use crate::stats::{self, Class, Stats};
@@ -31,9 +32,12 @@ const BUF: usize = 64 * 1024;
 /// Prepared entries up to this size are written to the compressor in one call; bigger ones in
 /// `io_buffer()` pieces, exactly as the streaming path reads them, so both give the same bytes.
 const WHOLE_WRITE: u64 = 1 << 20;
-/// The most memory the in-flight compression window may reserve, and the least.
+/// The most memory the creation pipeline may use for entries in flight and compressor state
+/// together, at the `Fast` profile and with plenty of memory; and the least, which any
+/// profile keeps so that work always makes progress (a job bigger than the room left still
+/// runs alone).
 const WINDOW_MAX: u64 = 128 << 20;
-const WINDOW_MIN: u64 = 8 << 20;
+const WINDOW_FLOOR: u64 = 4 << 20;
 /// Largest file compressed whole on a worker. Bigger ones stream on the calling thread.
 const SMALL_MAX: u64 = 32 << 20;
 /// Bookkeeping reserved per entry on top of the data: the entry, its header, the result.
@@ -417,6 +421,49 @@ fn compression(opts: &Options) -> Result<Compression> {
     })
 }
 
+/// Memory one compressor holds while it works, in bytes: what the encoder of `plan` allocates
+/// on top of the data. Measured as the peak of live heap between creating an entry and
+/// finishing it on a 64 KiB input (zip 9.1.3, zlib-rs, bzip2 0.6.1, zstd 0.14.3), then rounded
+/// up; see docs/reports/zip-upgrade.md. Deflate is an estimate from its window and tables.
+fn encoder_state(plan: Compression) -> u64 {
+    const KIB: u64 = 1 << 10;
+    const MIB: u64 = 1 << 20;
+    match plan.method {
+        CompressionMethod::Stored => 0,
+        CompressionMethod::Deflated => 512 * KIB,
+        // 0.4 MiB + 0.8 MiB per level (level 9: 7.4 MiB measured).
+        #[cfg(feature = "zip-bzip2")]
+        CompressionMethod::Bzip2 => {
+            let level = plan.level.unwrap_or(6).clamp(1, 9) as u64;
+            (400 + 800 * level) * KIB
+        }
+        // 1.4, 3.6, 15, 46, 70, 92 and 854 MiB measured at levels 1, 3, 9, 12, 15, 19, 22.
+        #[cfg(feature = "zip-zstd")]
+        CompressionMethod::Zstd => match plan.level.unwrap_or(3) {
+            ..=1 => 2 * MIB,
+            2..=3 => 4 * MIB,
+            4..=9 => 16 * MIB,
+            10..=12 => 48 * MIB,
+            13..=15 => 72 * MIB,
+            16..=19 => 96 * MIB,
+            _ => 864 * MIB,
+        },
+        _ => 2 * MIB,
+    }
+}
+
+/// Memory the creation pipeline may use at `profile`: entries in flight and the state of the
+/// compressors together. The memory limit sets it (an eighth), free RAM can only lower it (a
+/// sixteenth), and the profile takes its share: all for `Fast`, three quarters for `Balanced`,
+/// a quarter for `Gentle`, never under the floor.
+fn window_total(opts: &Options, profile: Profile) -> u64 {
+    let mut base = opts.limits.max_memory_bytes / 8;
+    if let Some(free) = opts.available_ram {
+        base = base.min(free / 16);
+    }
+    memory_share(profile, base.clamp(WINDOW_FLOOR, WINDOW_MAX)).max(WINDOW_FLOOR)
+}
+
 fn file_options<'k>(
     s: &SourceEntry,
     plan: Compression,
@@ -611,12 +658,33 @@ impl ArchiveFormat for ZipFormat {
         };
         let workers = opts.workers();
         let piece = opts.io_buffer();
-        let budget = (opts.limits.max_memory_bytes / 8).clamp(WINDOW_MIN, WINDOW_MAX);
-        let small = SMALL_MAX.min(budget / 4);
+        // Compressors take memory too: one per worker and one for the calling thread when it
+        // streams a big file. Their state may use half of the budget at most, which caps the
+        // workers when a level is hungry.
+        let state = encoder_state(plan);
+        let max_workers = match state {
+            0 => workers.pool,
+            n => usize::try_from(window_total(opts, Profile::Fast) / 2 / n)
+                .unwrap_or(usize::MAX)
+                .clamp(1, workers.pool),
+        };
+        // What entries in flight may reserve now: the profile's budget minus the compressors
+        // that may run. Asked again for every entry, so a profile switch reaches the next one.
+        let room = || {
+            let threads = workers.active().min(max_workers) as u64 + 1;
+            window_total(opts, workers.profile())
+                .saturating_sub(threads * state)
+                .max(PER_ENTRY)
+        };
+        if let Some(st) = &opts.stats {
+            let threads = workers.active().min(max_workers) as u64 + 1;
+            st.note_memory(window_total(opts, workers.profile()), threads * state);
+        }
         let cfg = pipeline::Config {
             workers: &workers,
-            budget,
+            budget: &room,
             max_items: WINDOW_ENTRIES,
+            max_workers,
         };
         // The zip writer keeps a central-directory record per entry until it finishes.
         let mut meta = MetaBudget::new(opts.limits.metadata_limit());
@@ -629,9 +697,14 @@ impl ArchiveFormat for ZipFormat {
             // library cannot encrypt outside a ZipWriter, so encrypted archives are serial.
             let parallel = secret.is_none() && workers.active() > 1;
             let file = s.kind == EntryKind::File;
+            // Bigger than a quarter of the room: streamed, never held whole.
+            let small = SMALL_MAX.min(room() / 4);
             Ok(Some(if file && parallel && s.size <= small {
                 let cost = 2 * s.size + PER_ENTRY;
-                Slot::Work { job: s, cost }
+                Slot::Work {
+                    job: (s, small),
+                    cost,
+                }
             } else {
                 // Only a file the sink streams for a long while is worth reading ahead of.
                 Slot::Inline {
@@ -640,7 +713,7 @@ impl ArchiveFormat for ZipFormat {
                 }
             }))
         };
-        let work = |s: SourceEntry| {
+        let work = |(s, small): (SourceEntry, u64)| {
             let (prepared, kept) = compress_small(&s, plan, opts, &tracker, small, piece)?;
             Ok(((s, prepared), kept))
         };

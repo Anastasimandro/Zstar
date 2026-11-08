@@ -81,15 +81,30 @@ raised or removed with `--no-limits`. The same keys exist under `[limits]` in th
 | `--max-metadata` | same as `--max-memory` | metadata held in memory: walk listings, the zip plan, what the zip and 7z writers keep per entry |
 
 - The metadata limit follows the memory limit unless it is set, so one number sizes both.
-  On Linux the command line also asks the OS for the RAM: below 4 GiB the memory limit (and
+  The command line also asks the OS for the RAM: below 4 GiB the memory limit (and
   with it the metadata limit) is a quarter of it, never under 64 MiB, and the entry limit
   shrinks in proportion: a 2 GiB device gets 512 MiB and 5,000,000 entries, a 3 GiB one 768
-  MiB and 7,500,000. Other systems use the defaults above until they report their RAM; the
-  Android app is meant to call `Limits::for_ram`.
+  MiB and 7,500,000.
 - Which of entries and metadata trips first: writers are charged the name plus 128 bytes per
   entry, so with the defaults they meet the metadata limit before 10 million entries (about
   4.7 million entries of 100-byte names). The zip extraction plan is charged the name plus 32
   bytes, so it meets the entry limit first only when names average under about 75 bytes.
+- Zip creation reads ahead and compresses on several threads, and what that holds is one
+  budget: entries in flight and the state of the compressors together. It is an eighth of the
+  memory limit (at most 128 MiB), lowered to a sixteenth of the RAM that is free right now when
+  the system says so; the profile takes its share (`fast` all, `balanced` three quarters,
+  `gentle` a quarter, never under 4 MiB). A compressor holds memory of its own (about 0.5 MiB
+  for deflate, up to 7 MiB for bzip2 and from 2 MiB to 864 MiB for zstd levels 1 to 22), one per
+  worker plus one for the thread that streams big files: that is counted inside the budget, and
+  a hungry level gets fewer workers instead of more memory (`--stats` shows `mem_budget_bytes`,
+  `mem_encoder_bytes` and `mem_reserved_peak_bytes`). Measured on the 851 MiB mixed set:
+  [docs/reports/zip-upgrade.md](docs/reports/zip-upgrade.md).
+- The limits follow the **total** RAM and the read-ahead the **free** RAM. A limit decides
+  whether an operation is refused, so the same archive must get the same answer on a busy and
+  on an idle machine; the read-ahead only trades speed for memory, so it may follow what is free.
+  The RAM is read from the OS (Linux and Android: `/proc/meminfo` and the cgroup limit; Windows:
+  `GlobalMemoryStatusEx`; macOS: `sysctl`). When it cannot be read the defaults apply. Set
+  `ZSTAR_RAM=2G` to act as a machine with that much memory.
 - While a tree is still being walked the progress total is unknown (`None`); it becomes known
   when the walk ends.
 

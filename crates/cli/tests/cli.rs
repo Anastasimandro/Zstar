@@ -194,7 +194,7 @@ fn stats_value<'a>(block: &'a [(String, String)], key: &str) -> &'a str {
     &block.iter().find(|(k, _)| k == key).unwrap().1
 }
 
-const STATS_KEYS: [&str; 37] = [
+const STATS_KEYS: [&str; 40] = [
     "stats_version",
     "operation",
     "format",
@@ -232,6 +232,9 @@ const STATS_KEYS: [&str; 37] = [
     "latency_p50_ms",
     "latency_p95_ms",
     "write_completion",
+    "mem_budget_bytes",
+    "mem_encoder_bytes",
+    "mem_reserved_peak_bytes",
 ];
 
 #[test]

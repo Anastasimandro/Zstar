@@ -226,6 +226,11 @@ pub struct Options {
     /// The kind of drive being worked on. The caller finds it out; core never detects
     /// hardware, and `Unknown` takes the HDD-safe I/O rules.
     pub drive: DriveKind,
+    /// Memory the system can give to programs right now, in bytes (`zstar_sys::ram()`), when
+    /// known. Unlike the limits, which follow the total RAM so that the same archive gets
+    /// the same answer on a busy and an idle machine, this only sizes how far zip creation
+    /// reads ahead (a speed and memory trade, never a refusal): a sixteenth of it at most.
+    pub available_ram: Option<u64>,
     /// Called by every thread working for the operation when it starts and whenever it sees
     /// the priority change. Core makes no OS calls: this is where a priority gets applied.
     pub worker_hook: Option<WorkerHook>,
@@ -261,6 +266,7 @@ impl Default for Options {
             control: Control::new(),
             profile: Profile::default(),
             drive: DriveKind::default(),
+            available_ram: None,
             worker_hook: None,
             open_hook: None,
             stats: None,
@@ -308,6 +314,7 @@ impl Options {
             pool,
             limit,
             s.priority,
+            self.profile.resolve(self.drive),
             self.stats.clone(),
         )
     }

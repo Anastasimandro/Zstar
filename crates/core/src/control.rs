@@ -249,6 +249,8 @@ pub(crate) struct Workers {
     limit: usize,
     /// Priority to use while the control has none of its own.
     priority: Priority,
+    /// The profile the operation started with, resolved (never `Auto`).
+    profile: Profile,
     /// Where per-thread timings are added when stats are on.
     #[cfg_attr(not(feature = "gzip"), allow(dead_code))]
     pub(crate) stats: Option<Stats>,
@@ -261,6 +263,7 @@ impl Workers {
         pool: usize,
         limit: usize,
         priority: Priority,
+        profile: Profile,
         stats: Option<Stats>,
     ) -> Self {
         Workers {
@@ -269,8 +272,15 @@ impl Workers {
             pool: pool.max(1),
             limit,
             priority,
+            profile,
             stats,
         }
+    }
+
+    /// The profile in force: the last one given to the control, else the starting one.
+    #[cfg_attr(not(feature = "zip"), allow(dead_code))]
+    pub(crate) fn profile(&self) -> Profile {
+        self.control.profile().unwrap_or(self.profile)
     }
 
     /// How many workers may run right now: at least 1, at most the pool.
@@ -374,7 +384,7 @@ mod tests {
     #[test]
     fn active_follows_the_control_within_the_pool() {
         let c = Control::new();
-        let w = Workers::new(c.clone(), None, 4, 2, Priority::Normal, None);
+        let w = Workers::new(c.clone(), None, 4, 2, Priority::Normal, Profile::Fast, None);
         assert_eq!(w.active(), 2);
         c.set_threads(9);
         assert_eq!(w.active(), 4);
@@ -383,7 +393,7 @@ mod tests {
         c.set_threads(0);
         assert_eq!(w.active(), 2);
         assert_eq!(
-            Workers::new(c, None, 0, 0, Priority::Normal, None).active(),
+            Workers::new(c, None, 0, 0, Priority::Normal, Profile::Fast, None).active(),
             1
         );
     }
@@ -394,7 +404,15 @@ mod tests {
         let log = heard.clone();
         let hook: WorkerHook = Arc::new(move |p| log.lock().unwrap().push(p));
         let c = Control::new();
-        let w = Workers::new(c.clone(), Some(hook), 2, 2, Priority::Normal, None);
+        let w = Workers::new(
+            c.clone(),
+            Some(hook),
+            2,
+            2,
+            Priority::Normal,
+            Profile::Fast,
+            None,
+        );
 
         w.sync_priority();
         w.sync_priority();
@@ -413,7 +431,7 @@ mod tests {
     #[test]
     fn a_waiting_worker_gives_way_to_cancel_and_to_the_end_of_the_work() {
         let c = Control::new();
-        let w = Workers::new(c.clone(), None, 4, 1, Priority::Normal, None);
+        let w = Workers::new(c.clone(), None, 4, 1, Priority::Normal, Profile::Fast, None);
         let ok = || Ok(());
         // Worker 0 is never held; worker 3 is above the limit but there is nothing left.
         assert!(w.checkpoint(0, ok, || false).is_ok());
@@ -448,7 +466,7 @@ mod tests {
     #[test]
     fn a_parked_worker_counts_its_waiting_and_a_free_one_does_not() {
         let c = Control::new();
-        let w = Workers::new(c.clone(), None, 4, 1, Priority::Normal, None);
+        let w = Workers::new(c.clone(), None, 4, 1, Priority::Normal, Profile::Fast, None);
         w.checkpoint(0, || Ok(()), || false).unwrap();
         assert_eq!(c.parked(), Duration::ZERO);
         let waited = std::cell::Cell::new(0);

@@ -45,10 +45,14 @@ pub(crate) enum Out<R, I> {
 
 pub(crate) struct Config<'a> {
     pub workers: &'a Workers,
-    /// Bytes that may be reserved at once. A job bigger than this still runs, alone.
-    pub budget: u64,
+    /// Bytes that may be reserved at once, asked again for every item so that a change of
+    /// profile takes effect at once. A job bigger than this still runs, alone.
+    pub budget: &'a dyn Fn() -> u64,
     /// Most items, of any kind, between the source and the sink.
     pub max_items: usize,
+    /// Most worker threads ever started (the memory their state takes is the caller's to
+    /// account for).
+    pub max_workers: usize,
 }
 
 enum Body<R, I> {
@@ -160,7 +164,7 @@ impl<J, R, I> Shared<J, R, I> {
         match item {
             Item::Work { job, cost } => {
                 // An empty window always admits: otherwise a big job could never run.
-                if !st.slots.is_empty() && st.reserved.saturating_add(cost) > cfg.budget {
+                if !st.slots.is_empty() && st.reserved.saturating_add(cost) > (cfg.budget)() {
                     return Err(Item::Work { job, cost });
                 }
                 st.reserved = st.reserved.saturating_add(cost);
@@ -170,7 +174,11 @@ impl<J, R, I> Shared<J, R, I> {
                 });
                 st.queue.push_back((seq, job));
                 st.outstanding += 1;
-                if st.spawned < st.outstanding.min(cfg.workers.active()) {
+                let wanted = st
+                    .outstanding
+                    .min(cfg.workers.active())
+                    .min(cfg.max_workers);
+                if st.spawned < wanted {
                     spawn = Some(st.spawned);
                     st.spawned += 1;
                 }
@@ -183,6 +191,7 @@ impl<J, R, I> Shared<J, R, I> {
         }
         if let Some(s) = &cfg.workers.stats {
             s.note_queue(st.slots.len());
+            s.note_reserved(st.reserved);
         }
         Ok(spawn)
     }
@@ -347,7 +356,8 @@ where
                 match shared.push(item, cfg) {
                     Ok(start) => {
                         if let Some(index) = start {
-                            scope.spawn(move || worker(shared, work, stop, cfg.workers, index));
+                            let workers = cfg.workers;
+                            scope.spawn(move || worker(shared, work, stop, workers, index));
                         }
                         continue;
                     }
@@ -374,11 +384,20 @@ where
 mod tests {
     use super::*;
     use crate::control::{Control, Priority};
+    use crate::profile::Profile;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::time::Instant;
 
     fn workers(pool: usize) -> Workers {
-        Workers::new(Control::default(), None, pool, pool, Priority::Normal, None)
+        Workers::new(
+            Control::default(),
+            None,
+            pool,
+            pool,
+            Priority::Normal,
+            Profile::Fast,
+            None,
+        )
     }
 
     fn never() -> Result<()> {
@@ -392,8 +411,9 @@ mod tests {
         let w = workers(4);
         let cfg = Config {
             workers: &w,
-            budget: BUDGET,
+            budget: &|| BUDGET,
             max_items: 1 << 20,
+            max_workers: usize::MAX,
         };
         // Bytes between "the source handed it out" and "the sink consumed it".
         let held = AtomicU64::new(0);
@@ -448,8 +468,9 @@ mod tests {
         let w = workers(4);
         let cfg = Config {
             workers: &w,
-            budget: u64::MAX,
+            budget: &|| u64::MAX,
             max_items: 1 << 20,
+            max_workers: usize::MAX,
         };
         let next = AtomicUsize::new(0);
         let source = || {
@@ -484,8 +505,9 @@ mod tests {
         let w = workers(2);
         let cfg = Config {
             workers: &w,
-            budget: 1 << 20,
+            budget: &|| 1 << 20,
             max_items: 64,
+            max_workers: usize::MAX,
         };
         let next = AtomicUsize::new(0);
         let sourced = AtomicUsize::new(0);
@@ -531,8 +553,9 @@ mod tests {
         let w = workers(3);
         let cfg = Config {
             workers: &w,
-            budget: u64::MAX,
+            budget: &|| u64::MAX,
             max_items: 1 << 20,
+            max_workers: usize::MAX,
         };
         let next = AtomicUsize::new(0);
         let started = AtomicUsize::new(0);
@@ -567,8 +590,9 @@ mod tests {
         let w = workers(2);
         let cfg = Config {
             workers: &w,
-            budget: 10,
+            budget: &|| 10,
             max_items: 1 << 20,
+            max_workers: usize::MAX,
         };
         let begun = Instant::now();
         let stop = || {

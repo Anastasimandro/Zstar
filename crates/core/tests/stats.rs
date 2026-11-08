@@ -279,3 +279,77 @@ fn a_cancelled_or_failed_file_is_not_counted_as_done() {
     let s = opts.stats_snapshot().unwrap();
     assert_eq!((s.files, s.renames, s.latency_p50), (0, 0, None), "{s:?}");
 }
+
+/// Zip creation under each profile and under a tiny amount of free RAM: the same bytes and the memory the pipeline reserved
+/// within the budget it reported (which shrinks with the profile).
+#[test]
+fn zip_creation_keeps_its_thread_ceiling_and_memory_budget_in_every_profile() {
+    use zstar_core::Profile;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    for i in 0..60 {
+        write(
+            &src.join(format!("small/{i:03}.bin")),
+            &pseudo(2000 + i * 97, i as u64),
+        );
+    }
+    // Sizes around the point where a file is streamed instead of held, in the middle of the
+    // order, so the calling thread streams while workers hold entries behind it.
+    for (i, n) in [3usize << 20, 5 << 20, 900 << 10].into_iter().enumerate() {
+        write(
+            &src.join(format!("mid/{i}.bin")),
+            &pseudo(n, 100 + i as u64),
+        );
+    }
+    for i in 0..60 {
+        write(
+            &src.join(format!("zlast/{i:03}.bin")),
+            &pseudo(3000 + i * 61, 200 + i as u64),
+        );
+    }
+    let make = |profile: Profile, free: Option<u64>| {
+        let opts = Options {
+            profile,
+            available_ram: free,
+            stats: Some(Stats::new()),
+            ..Options::default()
+        };
+        let out = tmp.path().join(format!("{profile:?}-{free:?}.zip"));
+        let _ = fs::remove_file(&out);
+        create_file(Format::Zip, std::slice::from_ref(&src), &out, &opts).unwrap();
+        (
+            fs::read(&out).unwrap(),
+            opts.stats_snapshot().unwrap(),
+            opts.effective_threads(),
+        )
+    };
+    let (reference, ..) = make(Profile::Fast, None);
+    let mut budgets = Vec::new();
+    for (profile, free) in [
+        (Profile::Fast, None),
+        (Profile::Balanced, None),
+        (Profile::Gentle, None),
+        (Profile::Fast, Some(64 << 20)), // a device with 64 MiB free
+    ] {
+        let (bytes, s, _) = make(profile, free);
+        assert!(
+            bytes == reference,
+            "{profile:?}/{free:?}: archive bytes changed"
+        );
+        assert!(s.mem_budget > 0, "{profile:?}: the budget is reported");
+        assert!(
+            s.mem_reserved_peak + s.mem_encoder <= s.mem_budget.max(4 << 20),
+            "{profile:?}/{free:?}: reserved {} + state {} over budget {}",
+            s.mem_reserved_peak,
+            s.mem_encoder,
+            s.mem_budget
+        );
+        budgets.push(s.mem_budget);
+    }
+    // Fast = all, Balanced = 3/4, Gentle = 1/4, and little free RAM shrinks it further.
+    assert_eq!(budgets[0], 128 << 20);
+    assert_eq!(budgets[1], budgets[0] / 4 * 3);
+    assert_eq!(budgets[2], budgets[0] / 4);
+    assert_eq!(budgets[3], 4 << 20);
+}

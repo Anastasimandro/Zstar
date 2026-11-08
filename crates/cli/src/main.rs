@@ -144,8 +144,19 @@ fn load_config(explicit: Option<&std::path::Path>, opts: &mut Options) -> Result
 fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Cli>, String> {
     let mut opts = Options::default();
     // Small devices get smaller defaults; the config file and flags below still override them.
-    if let Some(ram) = zstar_sys::ram() {
+    let mut ram = zstar_sys::ram();
+    // ZSTAR_RAM=2G acts as a machine with that much memory: for tests, and for containers
+    // whose limit the OS does not report.
+    if let Ok(given) = std::env::var("ZSTAR_RAM") {
+        let total = parse_size(&given).map_err(|e| format!("ZSTAR_RAM: {e}"))?;
+        ram = Some(zstar_sys::Ram {
+            total,
+            available: ram.and_then(|r| r.available).map(|a| a.min(total)),
+        });
+    }
+    if let Some(ram) = ram {
         opts.limits = zstar_core::Limits::for_ram(ram.total);
+        opts.available_ram = ram.available;
     }
     let mut command: Option<String> = None;
     let mut positional: Vec<PathBuf> = Vec::new();
@@ -422,7 +433,7 @@ fn same_device_all<'a>(output: &Path, inputs: impl IntoIterator<Item = &'a Path>
 }
 
 /// The `--stats` block: one `key: value` per line, durations in milliseconds with three
-/// decimals. Version 2 only appends keys to version 1, so existing keys keep their meaning
+/// decimals. Versions 2 and 3 only append keys, so existing keys keep their meaning
 /// and position. `codec_cpu_ms` is `n/a` unless the multi-threaded gzip path ran, and the
 /// queue and latency keys are `n/a` for formats that have none. See the docs of
 /// `zstar_core::StatsSnapshot` and the module docs of its `stats` module for what each number
@@ -452,7 +463,7 @@ fn stats_block(r: &Report<'_>, s: &StatsSnapshot) -> String {
     } else {
         ms(s.codec_cpu)
     };
-    let mut out = String::from("stats_version: 2\n");
+    let mut out = String::from("stats_version: 3\n");
     let mut line = |k: &str, v: String| {
         out.push_str(k);
         out.push_str(": ");
@@ -525,6 +536,17 @@ fn stats_block(r: &Report<'_>, s: &StatsSnapshot) -> String {
     line("latency_p95_ms", s.latency_p95.map_or_else(na, ms));
     // Writes and closes hand data to the OS; nothing here waits for the disk (no fsync).
     line("write_completion", "buffered".into());
+    // Version 3: the memory and thread accounting of zip creation (`n/a` elsewhere).
+    let bytes = |v: u64| {
+        if v > 0 {
+            v.to_string()
+        } else {
+            "n/a".to_owned()
+        }
+    };
+    line("mem_budget_bytes", bytes(s.mem_budget));
+    line("mem_encoder_bytes", bytes(s.mem_encoder));
+    line("mem_reserved_peak_bytes", bytes(s.mem_reserved_peak));
     out
 }
 

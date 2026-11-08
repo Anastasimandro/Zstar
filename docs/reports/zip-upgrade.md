@@ -241,6 +241,55 @@ counted in the reservation.
 Not measured: HDD, NVMe, cold cache, more than 2 CPUs, Windows, macOS, Android. With only two
 cores the run cannot show how the window scales to many workers.
 
+## Memory budget by profile, with compressor state
+
+The pipeline budget is now one number for entries in flight and compressor state together:
+`(max_memory_bytes / 8)`, lowered to `free RAM / 16` when the OS reports it, clamped to 4..128
+MiB, times the profile share (Fast 1, Balanced 3/4, Gentle 1/4, floor 4 MiB). It is asked again
+for every entry, so a live profile switch takes effect on the next one. Compressors are counted
+as `(workers + 1) * state` (one per worker plus the calling thread when it streams a big file)
+and may take half of the Fast budget at most: past that the number of workers is capped, not the
+memory raised.
+
+Per-compressor state, measured as peak live heap (malloc interposer) between creating an entry
+and finishing it on 64 KiB of input, zip 9.1.3; the table in `encoder_state` rounds these up:
+
+| method, level | measured | counted |
+|---|---|---|
+| deflate 1 / 6 / 9 | about 0.2 to 0.3 MiB (estimate, the small-input peak is hidden by growth of the output) | 0.5 MiB |
+| bzip2 1 / 6 / 9 | 1.1 / 4.9 / 7.2 MiB | 1.2 / 5.2 / 7.6 MiB |
+| zstd 1 / 3 / 9 | 1.4 / 3.6 / 15 MiB | 2 / 4 / 16 MiB |
+| zstd 12 / 15 / 19 / 22 | 46 / 70 / 92 / 854 MiB | 48 / 72 / 96 / 864 MiB |
+
+Zstd at level 22 alone needs 854 MiB: no budget can contain it, only fewer workers (one) and the
+note that the calling thread's own streaming compressor is not capped. That is the library's
+cost and was not changed.
+
+Mixed 851 MiB set, 2 CPUs, release, deflate default level, `--drive ssd`, medians of two runs
+(Fast also of five, interleaved with the build before this change: 11.85 s before, 11.44 s
+after, same peak RSS 165 / 167 MiB). Archive bytes are the same as the build before this change
+in every row but Gentle, which runs one thread and so the serial path, as before (see the note
+below the table).
+
+| profile / RAM given | threads | budget (stats) | reserved peak + state | wall | peak RSS | memory limit in force |
+|---|---|---|---|---|---|---|
+| Fast | 2 | 128 MiB | 126.5 + 1.5 MiB | 11.9 s | 164 MiB | 1 GiB |
+| Balanced | 2 | 96 MiB | 94.5 + 1.5 MiB | 12.3 s | 131 MiB | 1 GiB |
+| Gentle | 1 | 32 MiB | not used (serial) | 17.1 s | 14 MiB | 1 GiB |
+| Fast, `ZSTAR_RAM=3G` | 2 | 96 MiB | 94.5 + 1.5 MiB | 11.7 s | 117 MiB | 768 MiB |
+| Fast, `ZSTAR_RAM=2G` | 2 | 64 MiB | 62.5 + 1.5 MiB | 13.0 s | 83 MiB | 512 MiB |
+| Fast, `ZSTAR_RAM=512M` | 2 | 16 MiB | 14.5 + 1.5 MiB | 14.9 s | 25 MiB | 128 MiB |
+| Gentle, `ZSTAR_RAM=2G` | 1 | 16 MiB | not used (serial) | 17.0 s | 14 MiB | 512 MiB |
+
+Peak RSS is under the memory limit in every row, and the reservation plus the compressors never
+passes the budget. Note on Gentle: with one thread the creation does not use the pipeline, so
+the budget does not matter; its archive is 55 bytes smaller than the parallel one (530,297,834
+against 530,297,889 bytes). The same difference exists between `-j 1` and the default in the
+build before this change, because Deflate output depends on how the data is cut into writes
+and the serial path cuts at the I/O buffer where the pipeline writes a prepared entry of up to
+1 MiB whole. Not changed here (no change of archive bytes); it means the bytes depend on the
+thread count, which a user comparing archives made with different profiles will see.
+
 ## Encrypted zip: why it is slow, and 7z for comparison
 
 Cause, checked in the crate source and by measurement. `zip` 9.1.3 `src/aes.rs` derives the key

@@ -17,6 +17,12 @@ use crate::control::Priority;
 //   Gentle     1/4 of the CPUs, 1 to 2          Low
 //   Auto       resolved first: Ssd -> Fast, Hdd and Unknown -> Balanced
 //
+//   profile    share of the memory budget of an operation (zip creation today)
+//   Fast       1      (all of it)
+//   Balanced   3/4
+//   Gentle     1/4    (never under the floor an operation needs to make progress)
+//   Auto       resolved first, like the threads
+//
 //   drive      buffer     parallel many-file extraction
 //   Ssd        128 KiB    yes
 //   Hdd        1 MiB      no
@@ -37,6 +43,17 @@ pub(crate) fn cpu_rules(profile: Profile, cpus: usize) -> (usize, Priority) {
         Profile::Fast | Profile::Auto => (cpus, Priority::Normal),
         Profile::Balanced => (cpus - cpus / 4, Priority::Normal),
         Profile::Gentle => ((cpus / 4).clamp(1, 2), Priority::Low),
+    }
+}
+
+/// The part of a memory `budget` an already resolved profile may use: all of it for `Fast`,
+/// three quarters for `Balanced`, a quarter for `Gentle`.
+#[cfg_attr(not(feature = "zip"), allow(dead_code))]
+pub(crate) fn memory_share(profile: Profile, budget: u64) -> u64 {
+    match profile {
+        Profile::Fast | Profile::Auto => budget,
+        Profile::Balanced => budget / 4 * 3,
+        Profile::Gentle => budget / 4,
     }
 }
 

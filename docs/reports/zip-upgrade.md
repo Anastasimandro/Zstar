@@ -102,6 +102,40 @@ Two things the table shows that matter more than the upgrade:
   (9,997 to 9,999 of 10,000 entries in a different position than Zstar's order, different on
   every run, in the w1 test). So it cannot be wrapped: it can only be **not used**.
 
+## Experiment: a larger small-file limit with a byte budget per batch
+
+Zstar compresses entries up to 1 MiB whole on worker threads, in batches of 32 (`SMALL_FILE`,
+`flush_batch`). The experiment raised the limit to 8, 32 and 64 MiB, flushed a batch when the
+source bytes in it reached a budget (128, 256, 512 MiB), and streamed each file into the
+compressor in 128 KiB chunks so that only the compressed bytes are held. Median of 3
+interleaved runs, 2 threads, `--drive ssd`.
+
+| workload | build | wall s | CPU s | peak RSS MiB |
+|---|---|---|---|---|
+| w3 Deflate | main (9.1.3) | 15.37 | 16.29 | 20 |
+| w3 Deflate | limit 1 MiB (control, new read loop) | 15.47 | 16.37 | 15 |
+| w3 Deflate | limit 8 MiB, budget 128 MiB | 15.23 | 16.15 | 19 |
+| w3 Deflate | limit 32 MiB, budget 256 MiB | 15.06 | 16.25 | 79 |
+| w3 Deflate | limit 64 MiB, budget 512 MiB | 14.82 | 16.11 | 77 |
+| w3 Zstd | main (9.1.3) | 6.29 | 6.58 | 30 |
+| w3 Zstd | limit 1 MiB (control) | 6.45 | 6.84 | 23 |
+| w3 Zstd | limit 8 MiB, budget 128 MiB | 6.30 | 6.61 | 27 |
+| w3 Zstd | limit 32 MiB, budget 256 MiB | 6.15 | 6.57 | 75 |
+| w3 Zstd | limit 64 MiB, budget 512 MiB | 6.18 | 6.63 | 78 |
+| w1 Deflate (10,000 x 4 KiB) | all five builds | 0.64 to 0.67 | 1.06 to 1.10 | 14 |
+
+Limit 64 MiB with smaller batches (entries per batch 2, 4, 8 instead of 32), w3 Deflate:
+15.27, 15.13 and 14.83 s (RSS 84, 82, 76 MiB); w3 Zstd: 6.27, 6.16 and 6.04 s.
+
+Reading: **raising the limit gains at most 3.6% (15.37 to 14.82 s) and costs about 4 times the
+memory (20 to 77 MiB); smaller batches do not help either.** CPU time is the same in every
+row, so the extra core is not being used: wave compression keeps about one worker busy
+whatever the limit, because a batch ends when its slowest entry ends. The threshold is not the
+problem; the barrier between batches is. The threshold change is therefore not shipped; this
+result is input to the continuous pipeline (Task A, below). Note: the control row's archive is
+55 bytes smaller than main's, because the experimental read loop streams into the builder; the
+shipped pipeline keeps the exact current bytes.
+
 ## Extraction: independent readers and buffer size
 
 Experiment in the branch (environment switches, not a proposal for the API): one reader shared
@@ -147,22 +181,17 @@ reader available); `par_extract` (rejected by the rules, not run); the `ZipItera
 a continuous creation pipeline (not built: see below); PBKDF2 as the cause of slow encryption
 (inferred from CPU time and entry count, not profiled).
 
-## Recommendation
+## Recommendation and owner decisions
 
-1. **Do not upgrade `zip` now.** 9.4.1 gives no measured gain, costs 1 to 4% on Deflate,
-   duplicates `lzma-rust2`, and is a day or two old. Keep `=9.1.3`; look again when a release
-   brings something Zstar needs. Do not enable the `rayon` feature: the upstream parallel paths
-   break the memory, determinism, cancellation and streaming rules and cannot be wrapped.
-2. **The gain is in Zstar's own pipeline, not in the crate.** Compression of mixed sizes loses
-   about 40% because batches are waves; a continuous window (workers take the next entries,
-   an ordered writer appends them, in-flight bytes bounded by the memory limit) should reach
-   what upstream shows (w3 Deflate 8.7 s against 15.4 s) with bounded memory and the same
-   archive. That is the zip counterpart of the pargz pipeline you postponed until real-hardware
-   numbers; I did not start it. Say if you want it for zip first.
-3. **Encrypted creation** (17x slower on small files, one core) has no fix in any crate version.
-   Only writing the AES entries ourselves (the primitives are in the tree already) would
-   parallelise it. That is a hard-to-reverse format decision and yours.
-4. **Extraction**: independent readers are worth 2 to 6% on a warm cache and cost an API change
-   (a reader factory); not worth it without HDD or network numbers. A smaller change that is
-   worth testing on real hardware: never use a buffer over 128 KiB for zip (1 MiB doubles the
-   cost on small entries).
+Decided by the owner after this report (8 Nov 2026):
+
+1. **`zip` stays at `=9.1.3`.** No `rayon` feature, branch `zip-upgrade-ab` is kept for
+   reference and is not merged (it carries the new dependency and the environment switches).
+2. **The gain is in Zstar's own pipeline.** A continuous ordered window replaces the waves in
+   zip creation, as a reusable component, with in-flight memory bounded in bytes. Results:
+   see "Continuous pipeline" below once measured. The small-file limit is not changed on its own.
+3. **Encrypted creation is not fixed with new crypto.** No own AES, no fork. Cause and numbers
+   for the slowness, and the 7z comparison, are measured below.
+4. **Extraction**: independent readers are worth 2 to 6% on a warm cache and cost an API change;
+   not done without HDD or network numbers. A buffer above 128 KiB for zip is worth avoiding
+   (1 MiB doubles the cost on small entries); to be confirmed on real hardware.

@@ -271,7 +271,11 @@ impl Tuner {
         let mut tuner = Tuner {
             mode,
             bounds,
-            knobs: Knobs { workers: 1, io_depth: 1, chunk: bounds.min_chunk },
+            knobs: Knobs {
+                workers: 1,
+                io_depth: 1,
+                chunk: bounds.min_chunk,
+            },
             tick: 0,
             since_change: 0,
             window: Vec::with_capacity(MEASURE_TICKS),
@@ -291,8 +295,16 @@ impl Tuner {
         match remembered {
             Some(knobs) => tuner.knobs = tuner.clamp(knobs),
             None => {
-                let workers = if mode == Mode::BackgroundActive { 2 } else { tuner.worker_cap() };
-                tuner.knobs = tuner.clamp(Knobs { workers, io_depth: 2, chunk: DEFAULT_CHUNK });
+                let workers = if mode == Mode::BackgroundActive {
+                    2
+                } else {
+                    tuner.worker_cap()
+                };
+                tuner.knobs = tuner.clamp(Knobs {
+                    workers,
+                    io_depth: 2,
+                    chunk: DEFAULT_CHUNK,
+                });
                 tuner.queue = explore(&ALL_KNOBS);
                 tuner.exploring = true;
             }
@@ -414,12 +426,18 @@ impl Tuner {
         Knobs {
             workers: knobs.workers.clamp(1, self.worker_cap()),
             io_depth: knobs.io_depth.clamp(1, self.bounds.max_io_depth),
-            chunk: knobs.chunk.clamp(self.bounds.min_chunk, self.bounds.max_chunk),
+            chunk: knobs
+                .chunk
+                .clamp(self.bounds.min_chunk, self.bounds.max_chunk),
         }
     }
 
     fn hold(&self) -> Decision {
-        Decision { knobs: self.knobs, changed: false, reason: Reason::Hold }
+        Decision {
+            knobs: self.knobs,
+            changed: false,
+            reason: Reason::Hold,
+        }
     }
 
     fn decide(&mut self, old: Knobs, reason: Reason) -> Decision {
@@ -429,7 +447,11 @@ impl Tuner {
             self.window.clear();
             self.contended = 0;
         }
-        Decision { knobs: self.knobs, changed, reason }
+        Decision {
+            knobs: self.knobs,
+            changed,
+            reason,
+        }
     }
 
     fn interference(&self, sample: &Sample) -> Option<Cause> {
@@ -458,13 +480,21 @@ impl Tuner {
         if sample.io_ops > 0 {
             let latency = sample.io_wait.as_secs_f64() / sample.io_ops as f64;
             let key = (self.knobs.io_depth, self.knobs.chunk);
-            update(&mut self.lat_base, key, latency, self.tick, |new, old| new < old);
+            update(&mut self.lat_base, key, latency, self.tick, |new, old| {
+                new < old
+            });
         }
         let busy = sample.busy.as_secs_f64();
         if busy > 0.0 {
             let efficiency = sample.bytes as f64 / busy;
             let key = self.knobs.workers;
-            update(&mut self.eff_base, key, efficiency, self.tick, |new, old| new > old);
+            update(
+                &mut self.eff_base,
+                key,
+                efficiency,
+                self.tick,
+                |new, old| new > old,
+            );
         }
     }
 
@@ -488,7 +518,11 @@ impl Tuner {
 
     fn fallback(&mut self) -> Decision {
         let old = self.knobs;
-        self.knobs = self.clamp(Knobs { workers: 2, io_depth: 2, chunk: DEFAULT_CHUNK });
+        self.knobs = self.clamp(Knobs {
+            workers: 2,
+            io_depth: 2,
+            chunk: DEFAULT_CHUNK,
+        });
         self.trial = None;
         self.queue.clear();
         self.exploring = false;
@@ -505,7 +539,9 @@ impl Tuner {
         if let Some(trial) = self.trial.take() {
             return self.finish_trial(trial, rate);
         }
-        let drifted = self.reference.is_some_and(|r| (rate - r).abs() > r * RESTART_DRIFT);
+        let drifted = self
+            .reference
+            .is_some_and(|r| (rate - r).abs() > r * RESTART_DRIFT);
         if drifted
             && self.queue.is_empty()
             && self.cooldown == 0
@@ -579,7 +615,13 @@ impl Tuner {
             };
             let next = self.moved(knob, up);
             if next != self.knobs {
-                self.trial = Some(Trial { knob, up, from: self.knobs, base, slow });
+                self.trial = Some(Trial {
+                    knob,
+                    up,
+                    from: self.knobs,
+                    base,
+                    slow,
+                });
                 self.knobs = next;
                 return Some(Reason::Explore(knob));
             }
@@ -603,7 +645,11 @@ impl Tuner {
             Knob::Workers => knobs.workers = step_count(knobs.workers, up, self.exploring),
             Knob::IoDepth => knobs.io_depth = step_count(knobs.io_depth, up, self.exploring),
             Knob::Chunk => {
-                knobs.chunk = if up { knobs.chunk.saturating_mul(2) } else { knobs.chunk / 2 }
+                knobs.chunk = if up {
+                    knobs.chunk.saturating_mul(2)
+                } else {
+                    knobs.chunk / 2
+                }
             }
         }
         self.clamp(knobs)
@@ -611,7 +657,14 @@ impl Tuner {
 }
 
 fn explore(knobs: &[Knob]) -> VecDeque<Explore> {
-    knobs.iter().map(|&knob| Explore { knob, up: true, progressed: false }).collect()
+    knobs
+        .iter()
+        .map(|&knob| Explore {
+            knob,
+            up: true,
+            progressed: false,
+        })
+        .collect()
 }
 
 fn step_count(value: usize, up: bool, double: bool) -> usize {
@@ -629,7 +682,9 @@ fn median(window: &mut [f64]) -> f64 {
 }
 
 fn fresh<K: Eq + Hash>(map: &HashMap<K, Base>, key: &K, tick: u64) -> Option<f64> {
-    map.get(key).filter(|b| tick.saturating_sub(b.at) <= BASE_TTL).map(|b| b.value)
+    map.get(key)
+        .filter(|b| tick.saturating_sub(b.at) <= BASE_TTL)
+        .map(|b| b.value)
 }
 
 fn update<K: Eq + Hash>(
@@ -670,7 +725,14 @@ mod tests {
     }
 
     fn machine(bw: f64, lat: f64, par: usize, thrash: f64, cores: usize, core: f64) -> Machine {
-        Machine { bw: bw * MIB, lat, par, thrash, cores, per_core: core * MIB }
+        Machine {
+            bw: bw * MIB,
+            lat,
+            par,
+            thrash,
+            cores,
+            per_core: core * MIB,
+        }
     }
 
     fn machines() -> Vec<(&'static str, Machine)> {
@@ -686,11 +748,20 @@ mod tests {
     }
 
     fn named(name: &str) -> Machine {
-        machines().into_iter().find(|(n, _)| *n == name).map(|(_, m)| m).unwrap()
+        machines()
+            .into_iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, m)| m)
+            .unwrap()
     }
 
     fn bounds() -> TuneBounds {
-        TuneBounds { max_workers: 8, max_io_depth: 64, min_chunk: 128 << 10, max_chunk: 4 << 20 }
+        TuneBounds {
+            max_workers: 8,
+            max_io_depth: 64,
+            min_chunk: 128 << 10,
+            max_chunk: 4 << 20,
+        }
     }
 
     /// Our I/O rate, latency per request and the competitor's rate, with `d` requests of ours
@@ -773,7 +844,19 @@ mod tests {
             while io_depth <= b.max_io_depth {
                 let mut chunk = b.min_chunk;
                 while chunk <= b.max_chunk {
-                    best = best.max(rate_of(m, Knobs { workers, io_depth, chunk }, 0, 0).0);
+                    best = best.max(
+                        rate_of(
+                            m,
+                            Knobs {
+                                workers,
+                                io_depth,
+                                chunk,
+                            },
+                            0,
+                            0,
+                        )
+                        .0,
+                    );
                     chunk *= 2;
                 }
                 io_depth *= 2;
@@ -806,7 +889,10 @@ mod tests {
             for seed in [1, 7, 99, 12345] {
                 let (tuner, rates) = run(&m, Mode::Foreground, 600, seed);
                 let got = med(&rates[550..]);
-                assert!(got >= 0.9 * best, "{name} seed {seed}: {got} of {best}, {tuner:?}");
+                assert!(
+                    got >= 0.9 * best,
+                    "{name} seed {seed}: {got} of {best}, {tuner:?}"
+                );
             }
         }
     }
@@ -859,11 +945,21 @@ mod tests {
                 knobs.push(tuner.knobs());
             }
             let pressure = |k: Knobs| k.io_depth * k.workers;
-            assert!(pressure(knobs[215]) < pressure(knobs[199]), "{name}: {knobs:?}");
+            assert!(
+                pressure(knobs[215]) < pressure(knobs[199]),
+                "{name}: {knobs:?}"
+            );
             let alone = disk(&m, 0, COMP_CHUNK, 8).2;
-            assert!(med(&theirs) >= 0.8 * alone, "{name}: competitor {}", med(&theirs) / alone);
+            assert!(
+                med(&theirs) >= 0.8 * alone,
+                "{name}: competitor {}",
+                med(&theirs) / alone
+            );
             let (before, after) = (med(&ours[150..200]), med(&ours[750..]));
-            assert!(after >= 0.7 * before, "{name}: {after} after vs {before} before");
+            assert!(
+                after >= 0.7 * before,
+                "{name}: {after} after vs {before} before"
+            );
         }
     }
 
@@ -915,7 +1011,11 @@ mod tests {
     fn knobs_stay_within_bounds_in_every_mode() {
         let b = bounds();
         for (name, m) in machines() {
-            for mode in [Mode::Foreground, Mode::BackgroundActive, Mode::BackgroundAway] {
+            for mode in [
+                Mode::Foreground,
+                Mode::BackgroundActive,
+                Mode::BackgroundAway,
+            ] {
                 let mut tuner = Tuner::new(mode, b, None);
                 let mut rng = Rng(11);
                 for tick in 0..1500 {
@@ -924,9 +1024,18 @@ mod tests {
                     let input = tick % 400 == 399;
                     let (s, _, _) = sample(&m, tuner.knobs(), q, comp, &mut rng, input);
                     let k = tuner.step(&s).knobs;
-                    assert!((1..=b.max_workers).contains(&k.workers), "{name} {mode:?}: {k:?}");
-                    assert!((1..=b.max_io_depth).contains(&k.io_depth), "{name} {mode:?}: {k:?}");
-                    assert!((b.min_chunk..=b.max_chunk).contains(&k.chunk), "{name}: {k:?}");
+                    assert!(
+                        (1..=b.max_workers).contains(&k.workers),
+                        "{name} {mode:?}: {k:?}"
+                    );
+                    assert!(
+                        (1..=b.max_io_depth).contains(&k.io_depth),
+                        "{name} {mode:?}: {k:?}"
+                    );
+                    assert!(
+                        (b.min_chunk..=b.max_chunk).contains(&k.chunk),
+                        "{name}: {k:?}"
+                    );
                     if tuner.mode() == Mode::BackgroundActive {
                         assert!(k.workers <= 6, "{name} {mode:?}: {k:?}");
                     }
@@ -938,7 +1047,11 @@ mod tests {
     #[test]
     fn remembered_knobs_are_the_starting_point() {
         let m = named("nvme");
-        let start = Knobs { workers: 3, io_depth: 4, chunk: 2 << 20 };
+        let start = Knobs {
+            workers: 3,
+            io_depth: 4,
+            chunk: 2 << 20,
+        };
         let mut tuner = Tuner::new(Mode::Foreground, bounds(), Some(start));
         let mut rng = Rng(2);
         for tick in 0..80 {
@@ -957,7 +1070,11 @@ mod tests {
 
     #[test]
     fn invalid_samples_fall_back_to_safe_values() {
-        let start = Knobs { workers: 8, io_depth: 32, chunk: 4 << 20 };
+        let start = Knobs {
+            workers: 8,
+            io_depth: 32,
+            chunk: 4 << 20,
+        };
         let mut tuner = Tuner::new(Mode::Foreground, bounds(), Some(start));
         let empty = Sample::default();
         for _ in 1..FALLBACK_TICKS {
@@ -965,14 +1082,24 @@ mod tests {
         }
         let d = tuner.step(&empty);
         assert_eq!(d.reason, Reason::Fallback);
-        assert_eq!(d.knobs, Knobs { workers: 2, io_depth: 2, chunk: DEFAULT_CHUNK });
+        assert_eq!(
+            d.knobs,
+            Knobs {
+                workers: 2,
+                io_depth: 2,
+                chunk: DEFAULT_CHUNK
+            }
+        );
     }
 
     #[test]
     fn idle_ticks_change_nothing() {
         let mut tuner = Tuner::new(Mode::Foreground, bounds(), None);
         let before = tuner.knobs();
-        let idle = Sample { elapsed: Duration::from_millis(100), ..Sample::default() };
+        let idle = Sample {
+            elapsed: Duration::from_millis(100),
+            ..Sample::default()
+        };
         for _ in 0..1000 {
             assert!(!tuner.step(&idle).changed);
         }
@@ -1006,7 +1133,11 @@ mod tests {
     #[test]
     fn lower_ceilings_apply_at_once() {
         let mut tuner = Tuner::new(Mode::Foreground, bounds(), None);
-        let low = TuneBounds { max_workers: 2, max_io_depth: 1, ..bounds() };
+        let low = TuneBounds {
+            max_workers: 2,
+            max_io_depth: 1,
+            ..bounds()
+        };
         let d = tuner.set_bounds(low);
         assert!(d.changed);
         assert_eq!((d.knobs.workers, d.knobs.io_depth), (2, 1));
@@ -1014,7 +1145,12 @@ mod tests {
 
     #[test]
     fn senseless_bounds_are_made_safe() {
-        let zero = TuneBounds { max_workers: 0, max_io_depth: 0, min_chunk: 0, max_chunk: 0 };
+        let zero = TuneBounds {
+            max_workers: 0,
+            max_io_depth: 0,
+            min_chunk: 0,
+            max_chunk: 0,
+        };
         let tuner = Tuner::new(Mode::BackgroundActive, zero, None);
         let k = tuner.knobs();
         assert_eq!((k.workers, k.io_depth, k.chunk), (1, 1, MIN_CHUNK_FLOOR));

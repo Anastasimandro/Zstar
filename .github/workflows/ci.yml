@@ -70,4 +70,31 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      # cargo-deny is built from crates.io at a pinned version with --locked (crates.io checks
+      # the hash of every crate) and the binary is cached with the cargo registry, so the
+      # download is rare. Only the install is retried; the check below never is.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: cargo-deny
+          cache-bin: true
+      - name: Install cargo-deny
+        shell: bash
+        env:
+          CARGO_DENY_VERSION: "0.20.2"
+        run: |
+          if command -v cargo-deny >/dev/null && cargo deny --version | grep -qF "cargo-deny $CARGO_DENY_VERSION"; then
+            echo "cargo-deny $CARGO_DENY_VERSION is cached"
+            exit 0
+          fi
+          for attempt in 1 2 3; do
+            if cargo install cargo-deny --version "$CARGO_DENY_VERSION" --locked --force; then
+              exit 0
+            fi
+            echo "::warning::cargo-deny install failed (attempt $attempt of 3)"
+            sleep $((attempt * 15))
+          done
+          echo "::error::cargo-deny could not be installed"
+          exit 1
+      - name: Check dependencies
+        run: cargo deny --locked check

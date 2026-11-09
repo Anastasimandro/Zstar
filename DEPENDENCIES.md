@@ -1,7 +1,8 @@
 # Dependencies
 
 Zstar is licensed GPL-3.0-only. Every dependency below is under a licence that can be
-combined with it, and `cargo deny check` (see `deny.toml`) enforces that in CI.
+combined with it, and `cargo deny check` (see `deny.toml`) enforces that in CI. The CI job installs cargo-deny at the
+version pinned in `.github/workflows/ci.yml` (`CARGO_DENY_VERSION`); raise it there when needed.
 
 Versions are pinned exactly in the root `Cargo.toml` and were checked against the crates.io
 index when added. `Cargo.lock` is committed and CI builds with `--locked`.

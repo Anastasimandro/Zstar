@@ -19,3 +19,4 @@ Each ADR has a status, the context, the decision and its consequences. Keep it s
 | [0009](0009-drive-detection-and-thread-priority.md) | Drive detection and thread priority (crate sys) | Accepted |
 | [0010](0010-measure-first-adaptive-io.md) | Measure first, then regulate by measurement | Accepted |
 | [0011](0011-evidence-bounded-metadata-zip-ab.md) | Better evidence, bounded metadata memory, zip upgrade as an A/B | Accepted (Parts 1 to 3, addendum 8 Nov 2026) |
+| [0012](0012-tuning-by-measurement.md) | Tuning by measurement, in the foreground and in the background | Accepted (step 1) |

@@ -47,6 +47,7 @@ mod sources;
 mod stats;
 #[cfg(feature = "zip")]
 mod timeconv;
+mod tune;
 
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
@@ -61,6 +62,7 @@ pub use path::sanitize as sanitize_entry_name;
 pub use profile::{DriveKind, Profile, Settings, settings_for};
 pub use sources::{Listed, SourceEntry, SourceStream, Totals, collect_sources};
 pub use stats::{Stage, Stats, StatsSnapshot};
+pub use tune::{Cause, Decision, Knob, Knobs, Mode, Reason, Sample, TuneBounds, Tuner};
 
 /// Lists the entries of an archive, detecting its format first.
 ///

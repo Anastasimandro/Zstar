@@ -178,3 +178,37 @@ Owner-approved, and implemented in the commits after `4c0ea47`.
 
 Not measured: HDD, NVMe, cold cache, more than two CPUs, Windows, macOS, Android; the
 `for_ram` values were checked by tests, not on a 2 to 3 GiB device.
+
+## Addendum, 9 November 2026: follow-up tasks B to E
+
+- **B. RAM on every platform.** `zstar_sys::ram()` returns total and, when known, available
+  bytes: Linux and Android `/proc/meminfo` bounded by the cgroup limit (v2 and v1), Windows
+  `GlobalMemoryStatusEx`, macOS `sysctl` (`hw.memsize`; free, speculative and external
+  pageable pages for available). On failure the result is unknown and the defaults apply.
+  Hard limits (`Limits::for_ram`) follow the **total** RAM, so one archive gets one answer on a
+  busy and on an idle machine; only the read-ahead budget follows the **free** RAM. Parsing is
+  tested on every OS with fake `/proc/meminfo` and cgroup files; a real-call test runs on Linux
+  and Windows in CI. This replaces the sentence above that Windows and macOS use the defaults.
+- **C. Budget by profile, with compressor state.** One budget (an eighth of the memory limit,
+  at most 128 MiB, lowered to a sixteenth of the free RAM) covers entries in flight and the
+  compressors of every worker plus the calling thread; Fast takes all, Balanced three quarters,
+  Gentle a quarter, never under 4 MiB. The state per method and level was measured (deflate is
+  an estimate). A hungry level gets fewer workers, not more memory. `--stats` version 3 adds
+  `mem_budget_bytes`, `mem_encoder_bytes`, `mem_reserved_peak_bytes`. This closes the cost
+  named in item 2 (encoder state outside the reservation). Peak RSS on the 851 MiB mixed set:
+  Fast 164 MiB, Balanced 131, `ZSTAR_RAM=2G` 83, `ZSTAR_RAM=512M` 25, under the memory limit
+  in force in every case. Archive bytes unchanged. Limit that cannot be contained: zstd level
+  22 needs about 854 MiB for one compressor, and the calling thread's streaming compressor is
+  not capped; only the workers are.
+- **D. Thread ceiling.** The calling thread counts as busy while it handles an inline entry,
+  so no profile exceeds its ceiling (this closes the `threads + 1` cost of item 2); a live
+  switch through `Control` is followed. `--stats` adds `active_peak`. Fast on the mixed set:
+  11.85 s before, 11.44 s after.
+- **E. CI.** The `deny` job builds cargo-deny 0.20.2 from crates.io with `--locked`, caches the
+  binary and retries only the install. The check ran red on a temporary branch with
+  `time 0.1.43` (RUSTSEC-2020-0071).
+- Found and not changed: a serial (`-j 1`, or Gentle with one thread) archive differs from the
+  parallel one by 55 bytes on the mixed set, in every build, because Deflate output depends on
+  the write boundaries. Not measured: HDD, NVMe, cold cache, macOS, Android; the macOS memory
+  formula and the Windows call were not run by hand (Windows runs in CI; macOS is paused,
+  ADR 0004).

@@ -19,3 +19,5 @@ ctrlc.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+
+time-old = { package = "time", version = "=0.1.43" }

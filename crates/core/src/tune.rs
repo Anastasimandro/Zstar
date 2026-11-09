@@ -54,6 +54,12 @@ const RESTART_DRIFT: f64 = 0.25;
 const LAT_LIMIT: f64 = 1.5;
 /// Bytes per busy second under the reference that counts as someone else using the cores.
 const EFF_LIMIT: f64 = 0.85;
+/// Weight of a new clean tick in a latency or efficiency reference.
+const REF_ALPHA: f64 = 0.1;
+/// Smoothed ticks a reference needs before it is compared with anything.
+const REF_WARMUP: u32 = 6;
+/// Share of `busy` that must be CPU time under it to count as someone else using the cores.
+const CPU_SHARE_LIMIT: f64 = 0.85;
 /// Outside pressure (0 to 1) that counts as interference.
 const PRESSURE_LIMIT: f64 = 0.10;
 /// Contended ticks in a row before yielding, so one noisy tick does not count.
@@ -186,8 +192,12 @@ pub struct Sample {
     pub io_ops: u64,
     /// Time spent inside those reads and writes, summed over threads.
     pub io_wait: Duration,
-    /// Time workers spent working, summed over workers.
+    /// Wall time workers spent computing (not waiting for the drive), summed over workers.
     pub busy: Duration,
+    /// CPU time those workers actually got, summed over workers, if `crates/sys` can tell. It
+    /// falls below `busy` only when a thread waited for a core, whatever the data is, so it
+    /// tells a competitor from data that is merely slower to compress.
+    pub cpu: Option<Duration>,
     /// Pressure on the machine this operation did not cause, 0.0 to 1.0, if `crates/sys`
     /// can tell. Linux CPU and I/O PSI include this operation's own threads and must not be
     /// passed raw; memory PSI can be.
@@ -230,6 +240,8 @@ struct Explore {
 struct Base {
     value: f64,
     at: u64,
+    /// Samples behind `value`. Few of them make a noisy reference, so it is not used yet.
+    n: u32,
 }
 
 /// The adaptive tuner of one operation. See the module documentation.
@@ -257,7 +269,13 @@ pub struct Tuner {
     lat_base: HashMap<(usize, usize), Base>,
     /// Highest bytes per busy second, by worker count.
     eff_base: HashMap<usize, Base>,
-    best: Option<(f64, Knobs)>,
+    /// Last three latencies per request at the current knobs.
+    lat_ring: Ring3,
+    /// Last three bytes per busy second at the current knobs.
+    eff_ring: Ring3,
+    /// The knobs the last finished trial settled on. Not the fastest window: that one favours
+    /// whatever file mix happened to be streaming.
+    best: Option<Knobs>,
 }
 
 impl Tuner {
@@ -267,6 +285,16 @@ impl Tuner {
     /// Operations shorter than about a second finish before the tuner learns anything; for
     /// those, use `remembered` or the defaults and skip the tuner.
     pub fn new(mode: Mode, bounds: TuneBounds, remembered: Option<Knobs>) -> Self {
+        Self::build(mode, bounds, remembered, remembered.is_none())
+    }
+
+    /// Like [`Tuner::new`] without memory, but starting from `start` (for example a hint from
+    /// the drive kind) and still exploring from there.
+    pub fn with_start(mode: Mode, bounds: TuneBounds, start: Knobs) -> Self {
+        Self::build(mode, bounds, Some(start), true)
+    }
+
+    fn build(mode: Mode, bounds: TuneBounds, start: Option<Knobs>, explore_first: bool) -> Self {
         let bounds = bounds.sane();
         let mut tuner = Tuner {
             mode,
@@ -290,24 +318,26 @@ impl Tuner {
             invalid: 0,
             lat_base: HashMap::new(),
             eff_base: HashMap::new(),
+            lat_ring: Ring3::default(),
+            eff_ring: Ring3::default(),
             best: None,
         };
-        match remembered {
-            Some(knobs) => tuner.knobs = tuner.clamp(knobs),
-            None => {
-                let workers = if mode == Mode::BackgroundActive {
-                    2
-                } else {
-                    tuner.worker_cap()
-                };
-                tuner.knobs = tuner.clamp(Knobs {
-                    workers,
-                    io_depth: 2,
-                    chunk: DEFAULT_CHUNK,
-                });
-                tuner.queue = explore(&ALL_KNOBS);
-                tuner.exploring = true;
+        let knobs = start.unwrap_or_else(|| {
+            let workers = if mode == Mode::BackgroundActive {
+                2
+            } else {
+                tuner.worker_cap()
+            };
+            Knobs {
+                workers,
+                io_depth: 2,
+                chunk: DEFAULT_CHUNK,
             }
+        });
+        tuner.knobs = tuner.clamp(knobs);
+        if explore_first {
+            tuner.queue = explore(&ALL_KNOBS);
+            tuner.exploring = true;
         }
         tuner
     }
@@ -323,9 +353,10 @@ impl Tuner {
         self.mode
     }
 
-    /// The fastest knobs measured outside [`Mode::BackgroundActive`], to remember per volume.
+    /// The knobs the last finished trial settled on outside [`Mode::BackgroundActive`], to
+    /// remember per volume.
     pub fn best(&self) -> Option<Knobs> {
-        self.best.map(|(_, knobs)| knobs)
+        self.best
     }
 
     /// Switches mode. Lower ceilings apply at once; leaving `BackgroundActive` explores upwards
@@ -364,6 +395,12 @@ impl Tuner {
     pub fn step(&mut self, sample: &Sample) -> Decision {
         self.tick += 1;
         let old = self.knobs;
+        // First, and whatever else the tick holds: the input is a one-tick event, and an idle
+        // tick between files must not swallow it.
+        if sample.user_input && self.mode == Mode::BackgroundAway {
+            self.mode = Mode::BackgroundActive;
+            return self.yield_to(Cause::UserInput);
+        }
         let secs = sample.elapsed.as_secs_f64();
         if secs <= 0.0 {
             self.invalid += 1;
@@ -378,16 +415,13 @@ impl Tuner {
             // Idle, for example between files: nothing to learn.
             return self.hold();
         }
-        if sample.user_input && self.mode == Mode::BackgroundAway {
-            self.mode = Mode::BackgroundActive;
-            return self.yield_to(Cause::UserInput);
-        }
         self.since_change = self.since_change.saturating_add(1);
         if self.since_change <= SETTLE_TICKS {
             return self.hold();
         }
+        let smooth = self.smooth(sample);
         if self.mode == Mode::BackgroundActive {
-            match self.interference(sample) {
+            match self.interference(sample, &smooth) {
                 Some(cause) => {
                     self.contended += 1;
                     if self.contended >= BRAKE_TICKS {
@@ -399,7 +433,7 @@ impl Tuner {
                 None => self.contended = 0,
             }
         }
-        self.learn(sample);
+        self.learn(&smooth);
         self.cooldown = self.cooldown.saturating_sub(1);
         self.window.push(sample.bytes as f64 / secs);
         if self.window.len() < MEASURE_TICKS {
@@ -446,6 +480,8 @@ impl Tuner {
             self.since_change = 0;
             self.window.clear();
             self.contended = 0;
+            self.lat_ring.clear();
+            self.eff_ring.clear();
         }
         Decision {
             knobs: self.knobs,
@@ -454,12 +490,27 @@ impl Tuner {
         }
     }
 
-    fn interference(&self, sample: &Sample) -> Option<Cause> {
+    /// The tick's latency and efficiency, each as the median of the last three ticks at these
+    /// knobs. One tick of a real drive is too noisy to compare with the best one ever seen.
+    fn smooth(&mut self, sample: &Sample) -> Smooth {
+        let latency = (sample.io_ops > 0)
+            .then(|| sample.io_wait.as_secs_f64() / sample.io_ops as f64)
+            .and_then(|latency| self.lat_ring.push(latency));
+        let busy = sample.busy.as_secs_f64();
+        let efficiency = (busy > 0.0)
+            .then(|| sample.bytes as f64 / busy)
+            .and_then(|efficiency| self.eff_ring.push(efficiency));
+        Smooth {
+            latency,
+            efficiency,
+        }
+    }
+
+    fn interference(&self, sample: &Sample, smooth: &Smooth) -> Option<Cause> {
         if sample.pressure.is_some_and(|p| p > PRESSURE_LIMIT) {
             return Some(Cause::Pressure);
         }
-        if sample.io_ops > 0 {
-            let latency = sample.io_wait.as_secs_f64() / sample.io_ops as f64;
+        if let Some(latency) = smooth.latency {
             let key = (self.knobs.io_depth, self.knobs.chunk);
             if fresh(&self.lat_base, &key, self.tick).is_some_and(|b| latency > b * LAT_LIMIT) {
                 return Some(Cause::Disk);
@@ -467,33 +518,41 @@ impl Tuner {
         }
         let busy = sample.busy.as_secs_f64();
         if busy > 0.0 {
-            let efficiency = sample.bytes as f64 / busy;
-            let reference = fresh(&self.eff_base, &self.knobs.workers, self.tick);
-            if reference.is_some_and(|b| efficiency < b * EFF_LIMIT) {
-                return Some(Cause::Cpu);
+            if let Some(cpu) = sample.cpu {
+                // Data that compresses slowly leaves this share at 1; only a thread that
+                // waited for a core lowers it.
+                if cpu.as_secs_f64() < busy * CPU_SHARE_LIMIT {
+                    return Some(Cause::Cpu);
+                }
+            } else if let Some(efficiency) = smooth.efficiency {
+                let reference = fresh(&self.eff_base, &self.knobs.workers, self.tick);
+                if reference.is_some_and(|b| efficiency < b * EFF_LIMIT) {
+                    return Some(Cause::Cpu);
+                }
             }
         }
         None
     }
 
-    fn learn(&mut self, sample: &Sample) {
-        if sample.io_ops > 0 {
-            let latency = sample.io_wait.as_secs_f64() / sample.io_ops as f64;
+    fn learn(&mut self, smooth: &Smooth) {
+        if let Some(latency) = smooth.latency {
             let key = (self.knobs.io_depth, self.knobs.chunk);
-            update(&mut self.lat_base, key, latency, self.tick, |new, old| {
-                new < old
-            });
+            update(
+                &mut self.lat_base,
+                key,
+                latency,
+                self.tick,
+                |base, value| value <= base * LAT_LIMIT,
+            );
         }
-        let busy = sample.busy.as_secs_f64();
-        if busy > 0.0 {
-            let efficiency = sample.bytes as f64 / busy;
+        if let Some(efficiency) = smooth.efficiency {
             let key = self.knobs.workers;
             update(
                 &mut self.eff_base,
                 key,
                 efficiency,
                 self.tick,
-                |new, old| new > old,
+                |base, value| value >= base * EFF_LIMIT,
             );
         }
     }
@@ -533,8 +592,8 @@ impl Tuner {
     }
 
     fn on_epoch(&mut self, rate: f64) -> Reason {
-        if self.mode != Mode::BackgroundActive && self.best.is_none_or(|(best, _)| rate > best) {
-            self.best = Some((rate, self.knobs));
+        if self.mode != Mode::BackgroundActive && self.trial.is_none() && self.best.is_none() {
+            self.best = Some(self.knobs);
         }
         if let Some(trial) = self.trial.take() {
             return self.finish_trial(trial, rate);
@@ -569,6 +628,10 @@ impl Tuner {
             self.reference = Some(trial.base);
             Reason::Revert(trial.knob)
         };
+        if self.mode != Mode::BackgroundActive {
+            // Kept or reverted, these knobs are what the trial settled on.
+            self.best = Some(self.knobs);
+        }
         if trial.slow && self.queue.front().is_some_and(|f| f.knob == trial.knob) {
             let pop = match self.queue.front_mut() {
                 Some(front) if kept => {
@@ -656,6 +719,35 @@ impl Tuner {
     }
 }
 
+/// Latency and efficiency of a tick, smoothed.
+#[derive(Debug, Clone, Copy)]
+struct Smooth {
+    latency: Option<f64>,
+    efficiency: Option<f64>,
+}
+
+/// The last three values of a signal; their median once there are three.
+#[derive(Debug, Clone, Default)]
+struct Ring3 {
+    values: [f64; 3],
+    seen: usize,
+}
+
+impl Ring3 {
+    fn push(&mut self, value: f64) -> Option<f64> {
+        self.values[self.seen % 3] = value;
+        self.seen = self.seen.saturating_add(1);
+        (self.seen >= 3).then(|| {
+            let mut sorted = self.values;
+            median(&mut sorted)
+        })
+    }
+
+    fn clear(&mut self) {
+        self.seen = 0;
+    }
+}
+
 fn explore(knobs: &[Knob]) -> VecDeque<Explore> {
     knobs
         .iter()
@@ -683,22 +775,46 @@ fn median(window: &mut [f64]) -> f64 {
 
 fn fresh<K: Eq + Hash>(map: &HashMap<K, Base>, key: &K, tick: u64) -> Option<f64> {
     map.get(key)
-        .filter(|b| tick.saturating_sub(b.at) <= BASE_TTL)
+        .filter(|b| b.n >= REF_WARMUP && tick.saturating_sub(b.at) <= BASE_TTL)
         .map(|b| b.value)
 }
 
+/// Moves the reference of `key` towards `value` when `value` is not contended, and starts a
+/// new one when there is none or it expired. A reference nothing refreshes (a competitor that
+/// never leaves) expires after `BASE_TTL`, and the contended value becomes the new normal.
+///
+/// The reference is the typical value, not the best ever seen: the best of many noisy ticks
+/// sits in the tail of the noise, and a fixed ratio over it would fire on ordinary jitter.
 fn update<K: Eq + Hash>(
     map: &mut HashMap<K, Base>,
     key: K,
     value: f64,
     tick: u64,
-    better: fn(f64, f64) -> bool,
+    clean: fn(f64, f64) -> bool,
 ) {
-    let keep = map
-        .get(&key)
-        .is_some_and(|b| tick.saturating_sub(b.at) <= BASE_TTL && !better(value, b.value));
-    if !keep {
-        map.insert(key, Base { value, at: tick });
+    match map.get_mut(&key) {
+        Some(b) if tick.saturating_sub(b.at) <= BASE_TTL => {
+            if b.n < REF_WARMUP {
+                // Warm-up: a plain mean, with nothing rejected, so that one low sample cannot
+                // make every later ordinary tick look contended.
+                b.n += 1;
+                b.value += (value - b.value) / f64::from(b.n);
+                b.at = tick;
+            } else if clean(b.value, value) {
+                b.value += REF_ALPHA * (value - b.value);
+                b.at = tick;
+            }
+        }
+        _ => {
+            map.insert(
+                key,
+                Base {
+                    value,
+                    at: tick,
+                    n: 1,
+                },
+            );
+        }
     }
 }
 
@@ -807,9 +923,18 @@ mod tests {
 
         /// A factor between 0.97 and 1.03.
         fn noise(&mut self) -> f64 {
-            0.97 + 0.06 * ((self.next() >> 11) as f64 / (1u64 << 53) as f64)
+            self.jitter(0.03)
+        }
+
+        /// A factor between `1 - width` and `1 + width`.
+        fn jitter(&mut self, width: f64) -> f64 {
+            1.0 - width + 2.0 * width * ((self.next() >> 11) as f64 / (1u64 << 53) as f64)
         }
     }
+
+    /// Spread of the latency of a tick. A real drive is far noisier than the rate, and the
+    /// interference test compares one tick with the lowest ever seen.
+    const LAT_JITTER: f64 = 0.25;
 
     /// One tick on the machine with the given knobs: (sample, our rate, competitor rate).
     fn sample(
@@ -824,12 +949,14 @@ mod tests {
         let rate = rate * rng.noise();
         let bytes = (rate * DT) as u64;
         let io_ops = (bytes / k.chunk as u64).max(1);
+        let lat = lat * rng.jitter(LAT_JITTER);
         let sample = Sample {
             elapsed: Duration::from_secs_f64(DT),
             bytes,
             io_ops,
             io_wait: Duration::from_secs_f64(io_ops as f64 * lat),
             busy: Duration::from_secs_f64(k.workers as f64 * DT * (rate / cap).min(1.0)),
+            cpu: None,
             pressure: None,
             user_input,
         };
@@ -886,7 +1013,7 @@ mod tests {
     fn foreground_reaches_ninety_percent_of_the_best_fixed_setting_on_every_drive() {
         for (name, m) in machines() {
             let best = best_fixed(&m, bounds());
-            for seed in [1, 7, 99, 12345] {
+            for seed in 1..=40 {
                 let (tuner, rates) = run(&m, Mode::Foreground, 600, seed);
                 let got = med(&rates[550..]);
                 assert!(
@@ -901,7 +1028,7 @@ mod tests {
     fn foreground_converges_within_fifteen_seconds() {
         for (name, m) in machines() {
             let best = best_fixed(&m, bounds());
-            for seed in [1, 7, 99, 12345] {
+            for seed in 1..=40 {
                 let (_, rates) = run(&m, Mode::Foreground, 150, seed);
                 let got = med(&rates[100..150]);
                 assert!(got >= 0.9 * best, "{name} seed {seed}: {got} of {best}");
@@ -912,7 +1039,7 @@ mod tests {
     #[test]
     fn background_does_not_yield_without_a_competitor() {
         for (name, m) in machines() {
-            for seed in [1, 7, 99] {
+            for seed in 1..=40 {
                 let mut tuner = Tuner::new(Mode::BackgroundActive, bounds(), None);
                 let mut rng = Rng(seed);
                 for tick in 0..800 {
@@ -930,9 +1057,17 @@ mod tests {
     #[test]
     fn background_yields_to_a_disk_competitor_and_recovers() {
         for name in ["sata_ssd", "nvme"] {
+            for seed in 1..=20 {
+                disk_competitor(name, seed);
+            }
+        }
+    }
+
+    fn disk_competitor(name: &str, seed: u64) {
+        {
             let m = named(name);
             let mut tuner = Tuner::new(Mode::BackgroundActive, bounds(), None);
-            let mut rng = Rng(3);
+            let mut rng = Rng(seed);
             let (mut ours, mut theirs, mut knobs) = (Vec::new(), Vec::new(), Vec::new());
             for tick in 0..800 {
                 let q = if (200..400).contains(&tick) { 8 } else { 0 };
@@ -966,16 +1101,21 @@ mod tests {
     #[test]
     fn background_yields_cores_to_a_cpu_competitor() {
         let m = named("nvme");
-        let mut tuner = Tuner::new(Mode::BackgroundActive, bounds(), None);
-        let mut rng = Rng(5);
-        let mut knobs = Vec::new();
-        for tick in 0..400 {
-            let comp = if tick >= 200 { 6 } else { 0 };
-            let (s, _, _) = sample(&m, tuner.knobs(), 0, comp, &mut rng, false);
-            tuner.step(&s);
-            knobs.push(tuner.knobs());
+        for seed in 1..=20 {
+            let mut tuner = Tuner::new(Mode::BackgroundActive, bounds(), None);
+            let mut rng = Rng(seed);
+            let mut knobs = Vec::new();
+            for tick in 0..400 {
+                let comp = if tick >= 200 { 6 } else { 0 };
+                let (s, _, _) = sample(&m, tuner.knobs(), 0, comp, &mut rng, false);
+                tuner.step(&s);
+                knobs.push(tuner.knobs());
+            }
+            assert!(
+                knobs[260].workers < knobs[199].workers,
+                "seed {seed}: {knobs:?}"
+            );
         }
-        assert!(knobs[260].workers < knobs[199].workers, "{knobs:?}");
     }
 
     #[test]
@@ -1066,6 +1206,105 @@ mod tests {
         let (tuner, _) = run(&named("hdd"), Mode::Foreground, 300, 1);
         let best = tuner.best().unwrap();
         assert_eq!(best.io_depth, 1, "{best:?}");
+    }
+
+    #[test]
+    fn best_is_a_setting_that_works_not_a_lucky_window() {
+        for (name, m) in machines() {
+            let (tuner, _) = run(&m, Mode::Foreground, 600, 21);
+            let best = tuner.best().unwrap();
+            let got = rate_of(&m, best, 0, 0).0;
+            assert!(got >= 0.9 * best_fixed(&m, bounds()), "{name}: {best:?}");
+        }
+    }
+
+    #[test]
+    fn input_during_an_idle_tick_is_not_lost() {
+        let mut tuner = Tuner::new(Mode::BackgroundAway, bounds(), None);
+        let idle = Sample {
+            elapsed: Duration::from_millis(100),
+            user_input: true,
+            ..Sample::default()
+        };
+        let d = tuner.step(&idle);
+        assert_eq!(d.reason, Reason::Yield(Cause::UserInput));
+        assert_eq!(tuner.mode(), Mode::BackgroundActive);
+    }
+
+    #[test]
+    fn a_start_hint_is_explored_from_not_kept() {
+        let m = named("nvme");
+        let low = Knobs {
+            workers: 1,
+            io_depth: 1,
+            chunk: 128 << 10,
+        };
+        let mut tuner = Tuner::with_start(Mode::Foreground, bounds(), low);
+        assert_eq!(tuner.knobs(), low);
+        let mut rng = Rng(8);
+        let mut rates = Vec::new();
+        for _ in 0..300 {
+            let (s, rate, _) = sample(&m, tuner.knobs(), 0, 0, &mut rng, false);
+            tuner.step(&s);
+            rates.push(rate);
+        }
+        assert!(med(&rates[250..]) >= 0.9 * best_fixed(&m, bounds()));
+    }
+
+    /// From tick 250 the data takes three times as long to compress: fewer bytes per busy
+    /// second with nobody else on the cores. Whether the tuner yielded.
+    fn background_with_slower_data(with_cpu: bool) -> bool {
+        let m = named("nvme");
+        let mut tuner = Tuner::new(Mode::BackgroundActive, bounds(), None);
+        let mut rng = Rng(6);
+        let mut yielded = false;
+        for tick in 0..500 {
+            let k = tuner.knobs();
+            let (mut s, _, _) = sample(&m, k, 0, 0, &mut rng, false);
+            if tick >= 250 {
+                // Fewer requests, each as fast as before: only the CPU got slower.
+                let per_request = s.io_wait.as_secs_f64() / s.io_ops as f64;
+                s.bytes /= 3;
+                s.io_ops = (s.bytes / k.chunk as u64).max(1);
+                s.io_wait = Duration::from_secs_f64(s.io_ops as f64 * per_request);
+                s.busy = Duration::from_secs_f64(k.workers as f64 * DT);
+            }
+            if with_cpu {
+                s.cpu = Some(s.busy);
+            }
+            yielded |= matches!(tuner.step(&s).reason, Reason::Yield(_));
+        }
+        yielded
+    }
+
+    #[test]
+    fn slower_data_is_not_a_competitor_when_the_cpu_share_is_known() {
+        assert!(!background_with_slower_data(true));
+    }
+
+    #[test]
+    fn without_the_cpu_share_slower_data_looks_like_a_competitor() {
+        // The fallback signal cannot tell them apart; this pins why the share exists.
+        assert!(background_with_slower_data(false));
+    }
+
+    #[test]
+    fn a_cpu_competitor_shows_in_the_cpu_share() {
+        let m = named("nvme");
+        let mut tuner = Tuner::new(Mode::BackgroundActive, bounds(), None);
+        let mut rng = Rng(5);
+        let mut knobs = Vec::new();
+        for tick in 0..400 {
+            let comp = if tick >= 200 { 6 } else { 0 };
+            let k = tuner.knobs();
+            let (mut s, _, _) = sample(&m, k, 0, comp, &mut rng, false);
+            let full = k.workers.min(m.cores.saturating_sub(comp));
+            let share = (full as f64 + 0.1 * (k.workers - full) as f64) / k.workers as f64;
+            s.cpu = Some(s.busy.mul_f64(share));
+            tuner.step(&s);
+            knobs.push(tuner.knobs());
+        }
+        assert!(knobs[260].workers < knobs[199].workers, "{knobs:?}");
     }
 
     #[test]

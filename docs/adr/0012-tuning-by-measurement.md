@@ -32,15 +32,25 @@ which matters most when the user leaves an operation running in the background.
    the median. Up is kept above +5%; down is kept if it costs under 2%. Fresh start doubles each
    knob while it pays (slow start); later probes move one step, every ~9 s in the foreground. A
    change over 25% at the same knobs means the machine changed: explore again.
-5. **Interference, from our own numbers:** latency per request over 1.5x the best seen at the same
-   depth and request size (drive busy), or bytes per busy second under 0.85x the best seen at the
-   same worker count (cores busy or throttling), or outside pressure over 0.10. Two contended ticks
-   in a row halve workers and depth; no probing for 20 ticks. References expire after 60 s.
+5. **Interference, from our own numbers:** latency per request over 1.5x the typical value at the
+   same depth and request size (drive busy), or CPU time under 0.85x of busy time (a thread
+   waited for a core), or outside pressure over 0.10. Two contended ticks in a row halve workers
+   and depth; no probing for 20 ticks. Each signal is the median of the last three ticks. A
+   reference is a plain mean of its first 6 samples, then a moving average (weight 0.1) of clean
+   ticks only, and it expires after 60 s without a clean tick. It is the typical value, not the
+   best seen: the best of many noisy ticks sits in the tail of the noise and fires on jitter
+   (measured in the simulator with 25% latency jitter). When `Sample::cpu` is missing, bytes per
+   busy second under 0.85x the typical value stands in for the CPU test; it cannot tell a
+   competitor from data that compresses slower, so `crates/sys` should supply `cpu`.
 6. **Safety:** never above the ceilings, never below one worker and one request; 20 senseless
    samples in a row fall back to 2 workers, 2 requests, 1 MiB. Output bytes do not depend on the
    knobs.
-7. **Memory per volume:** `Tuner::best` returns the fastest knobs measured; the cli stores them per
-   volume and passes them as `remembered` next time, which skips the slow start.
+7. **Memory per volume:** `Tuner::best` returns the knobs the last finished trial settled on, not
+   the fastest window (which favours whatever file mix was streaming); the cli stores them per
+   volume and passes them as `remembered` next time, which skips the slow start. A hint (for
+   example from the drive kind) goes in `Tuner::with_start`, which starts there and still explores.
+8. **User input** is read before anything else in a tick: an idle tick between files must not
+   swallow the one-tick event that ends `BackgroundAway`.
 
 ## Acceptance (simulated now, measured later)
 

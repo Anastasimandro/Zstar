@@ -84,6 +84,8 @@
 //!   memory it was allowed for entries in flight and compressor state together, the part of it
 //!   set aside for the state of the compressors (every worker's and the calling thread's), and
 //!   the most it reserved for entries at once. `n/a` for formats without that pipeline.
+//! * `active_peak`: the most threads busy at once inside the zip pipeline; it must not exceed
+//!   the thread limit of the profile (`threads_start`, or the lower limit after a switch).
 //! * `queue_avg` / `queue_max`: how many items were handed to the workers each time a gzip
 //!   wave or a zip batch started. Sampled at that moment, not time-weighted. Formats without
 //!   a queue report none.
@@ -178,6 +180,7 @@ struct Counters {
     mem_budget: AtomicU64,
     mem_encoder: AtomicU64,
     mem_reserved_peak: AtomicU64,
+    active_peak: AtomicU64,
     latency: Histogram,
 }
 
@@ -401,6 +404,9 @@ pub struct StatsSnapshot {
     pub mem_encoder: u64,
     /// Most bytes the pipeline had reserved at once for entries in flight.
     pub mem_reserved_peak: u64,
+    /// Most threads busy at the same time inside the zip pipeline (workers in a job, and the
+    /// calling thread while it handles an entry itself); 0 when it did not run.
+    pub active_peak: u64,
     pub latency_p50: Option<Duration>,
     pub latency_p95: Option<Duration>,
 }
@@ -479,6 +485,7 @@ impl Stats {
             mem_budget: c.mem_budget.load(Relaxed),
             mem_encoder: c.mem_encoder.load(Relaxed),
             mem_reserved_peak: c.mem_reserved_peak.load(Relaxed),
+            active_peak: c.active_peak.load(Relaxed),
             latency_p50: c.latency.quantile(0.50),
             latency_p95: c.latency.quantile(0.95),
         }
@@ -531,6 +538,11 @@ impl Stats {
     #[cfg_attr(not(feature = "zip"), allow(dead_code))]
     pub(crate) fn note_reserved(&self, bytes: u64) {
         self.0.mem_reserved_peak.fetch_max(bytes, Relaxed);
+    }
+
+    #[cfg_attr(not(feature = "zip"), allow(dead_code))]
+    pub(crate) fn note_active(&self, threads: usize) {
+        self.0.active_peak.fetch_max(threads as u64, Relaxed);
     }
 
     #[cfg_attr(not(feature = "gzip"), allow(dead_code))]

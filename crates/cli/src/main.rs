@@ -547,6 +547,7 @@ fn stats_block(r: &Report<'_>, s: &StatsSnapshot) -> String {
     line("mem_budget_bytes", bytes(s.mem_budget));
     line("mem_encoder_bytes", bytes(s.mem_encoder));
     line("mem_reserved_peak_bytes", bytes(s.mem_reserved_peak));
+    line("active_peak", bytes(s.active_peak));
     out
 }
 

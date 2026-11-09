@@ -75,6 +75,12 @@ struct State<J, R, I> {
     reserved: u64,
     /// Jobs queued or running.
     outstanding: usize,
+    /// Workers inside a job.
+    working: usize,
+    /// The calling thread is handling an inline item.
+    sink_busy: bool,
+    /// The calling thread waits for room to handle an inline item: no new job starts.
+    sink_wants: bool,
     spawned: usize,
     closed: bool,
     /// A job failed: nothing new is started, and the sink reaches the error in order.
@@ -111,18 +117,71 @@ impl<J, R, I> Shared<J, R, I> {
         st.closed || st.failed
     }
 
-    /// The next job, waiting for one; `None` when the pipeline is over.
-    fn claim(&self) -> Option<(u64, J)> {
+    /// The next job, waiting for one and for a free place among the threads the profile
+    /// allows (the calling thread counts as one while it handles an inline item); `None`
+    /// when the pipeline is over. The limit is read again every [`POLL`], so a profile
+    /// switch is seen even by a worker that is waiting.
+    fn claim(&self, workers: &Workers) -> Option<(u64, J)> {
         let mut st = self.lock();
         loop {
             if st.closed || st.failed {
                 return None;
             }
-            if let Some(job) = st.queue.pop_front() {
+            let busy = st.working + usize::from(st.sink_busy);
+            if !st.queue.is_empty() && !st.sink_wants && busy < workers.active() {
+                let job = st.queue.pop_front()?;
+                st.working += 1;
+                if let Some(s) = &workers.stats {
+                    s.note_active(busy + 1);
+                }
                 return Some(job);
             }
-            st = self.work.wait(st).unwrap_or_else(PoisonError::into_inner);
+            st = self
+                .work
+                .wait_timeout(st, POLL)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
         }
+    }
+
+    /// The calling thread is about to handle an inline item: waits until it fits under the
+    /// thread limit together with the workers that are inside a job.
+    fn begin_inline(
+        &self,
+        workers: &Workers,
+        stop: &(dyn Fn() -> Result<()> + Sync),
+    ) -> Result<()> {
+        loop {
+            {
+                let mut st = self.lock();
+                st.sink_wants = true;
+                if st.working < workers.active() {
+                    st.sink_wants = false;
+                    st.sink_busy = true;
+                    if let Some(s) = &workers.stats {
+                        s.note_active(st.working + 1);
+                    }
+                    return Ok(());
+                }
+                // A running job ends within moments and tells us.
+                stats::timed(workers.stats.as_ref(), Class::Workers, || {
+                    drop(
+                        self.ready
+                            .wait_timeout(st, POLL)
+                            .unwrap_or_else(PoisonError::into_inner),
+                    );
+                });
+            }
+            if let Err(e) = stop() {
+                self.lock().sink_wants = false;
+                return Err(e);
+            }
+        }
+    }
+
+    fn end_inline(&self) {
+        self.lock().sink_busy = false;
+        self.work.notify_all();
     }
 
     fn finish(&self, seq: u64, result: Result<(R, u64)>) {
@@ -139,11 +198,12 @@ impl<J, R, I> Shared<J, R, I> {
         slot.body = body;
         st.reserved = st.reserved.saturating_sub(old).saturating_add(kept);
         st.outstanding -= 1;
+        st.working -= 1;
         if failed {
             st.failed = true;
             self.work.notify_all();
         }
-        if index == 0 {
+        if index == 0 || st.sink_wants {
             self.ready.notify_all();
         }
     }
@@ -290,7 +350,9 @@ fn worker<J, R, I>(
             return;
         }
         // A worker without a job is waiting for the source.
-        let claimed = stats::timed(workers.stats.as_ref(), Class::Input, || shared.claim());
+        let claimed = stats::timed(workers.stats.as_ref(), Class::Input, || {
+            shared.claim(workers)
+        });
         let Some((seq, job)) = claimed else { return };
         shared.finish(seq, work(job));
     }
@@ -324,6 +386,9 @@ where
             queue: VecDeque::new(),
             reserved: 0,
             outstanding: 0,
+            working: 0,
+            sink_busy: false,
+            sink_wants: false,
             spawned: 0,
             closed: false,
             failed: false,
@@ -338,12 +403,23 @@ where
         let shared = &shared;
         let mut held: Option<Item<J, I>> = None;
         let mut source_done = false;
+        // An inline item is work of the calling thread: it takes a place among the threads.
+        let mut deliver = |out: Out<R, I>| -> Result<()> {
+            if matches!(out, Out::Inline(_)) {
+                shared.begin_inline(cfg.workers, stop)?;
+                let done = sink(out);
+                shared.end_inline();
+                done
+            } else {
+                sink(out)
+            }
+        };
         loop {
             stop()?;
             // Whatever is already finished goes out first: it frees budget.
             while let Some(out) = shared.try_pop() {
                 let (out, cost) = out?;
-                sink(out)?;
+                deliver(out)?;
                 shared.release(cost);
             }
             if held.is_none() && !source_done && shared.has_item_room(cfg) {
@@ -370,7 +446,7 @@ where
             // The budget is spent or the source is over: wait for the first item.
             match shared.wait_pop(stop, stats)? {
                 Some((out, cost)) => {
-                    sink(out)?;
+                    deliver(out)?;
                     shared.release(cost);
                 }
                 None if source_done && held.is_none() => return Ok(()),
@@ -618,5 +694,127 @@ mod tests {
         // job; the point is that the calling thread noticed at once (it did not start a
         // second round of work).
         assert!(next.load(Ordering::SeqCst) <= 3);
+    }
+
+    /// Threads busy at once: workers inside a job plus the calling thread inside an inline item.
+    struct Busy {
+        now: AtomicUsize,
+        peak: AtomicUsize,
+    }
+
+    impl Busy {
+        fn new() -> Self {
+            Busy {
+                now: AtomicUsize::new(0),
+                peak: AtomicUsize::new(0),
+            }
+        }
+        fn enter(&self) {
+            let n = self.now.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(n, Ordering::SeqCst);
+        }
+        fn leave(&self) {
+            self.now.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    /// Mixed jobs and slow inline items (a big file being streamed).
+    fn run_mixed(w: &Workers, busy: &Busy, items: usize, on_item: &(dyn Fn(usize) + Sync)) {
+        let cfg = Config {
+            workers: w,
+            budget: &|| u64::MAX,
+            max_items: 1 << 20,
+            max_workers: usize::MAX,
+        };
+        let next = AtomicUsize::new(0);
+        let source = || {
+            let n = next.fetch_add(1, Ordering::SeqCst);
+            on_item(n);
+            Ok((n < items).then_some(if n % 5 == 2 {
+                Item::Inline {
+                    item: n,
+                    defer: true,
+                }
+            } else {
+                Item::Work { job: n, cost: 1 }
+            }))
+        };
+        let work = |n: usize| {
+            busy.enter();
+            std::thread::sleep(Duration::from_millis(4));
+            busy.leave();
+            Ok((n, 1))
+        };
+        run(&cfg, &never, source, &work, |out: Out<usize, usize>| {
+            if let Out::Inline(_) = out {
+                busy.enter();
+                std::thread::sleep(Duration::from_millis(12));
+                busy.leave();
+            }
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn the_calling_thread_counts_against_the_thread_ceiling() {
+        for ceiling in [1, 2, 3, 4] {
+            let control = Control::default();
+            control.set_threads(ceiling);
+            let w = Workers::new(control, None, 8, 8, Priority::Normal, Profile::Fast, None);
+            let busy = Busy::new();
+            run_mixed(&w, &busy, 120, &|_| {});
+            let peak = busy.peak.load(Ordering::SeqCst);
+            assert!(
+                peak <= ceiling,
+                "ceiling {ceiling}: {peak} threads busy at once"
+            );
+            // The ceiling is used, not just respected.
+            if ceiling > 1 {
+                assert_eq!(peak, ceiling, "ceiling {ceiling}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_live_switch_to_a_lower_ceiling_is_followed() {
+        let control = Control::default();
+        control.set_threads(4);
+        let w = Workers::new(
+            control.clone(),
+            None,
+            8,
+            8,
+            Priority::Normal,
+            Profile::Fast,
+            None,
+        );
+        let busy = Busy::new();
+        let switched = AtomicUsize::new(usize::MAX);
+        let after = AtomicUsize::new(0);
+        run_mixed(&w, &busy, 400, &|n| {
+            if n == 100 {
+                control.set_threads(2);
+                // Whatever runs now may finish; what starts later must fit under 2.
+                std::thread::sleep(Duration::from_millis(60));
+                busy.peak
+                    .store(busy.now.load(Ordering::SeqCst), Ordering::SeqCst);
+                switched.store(n, Ordering::SeqCst);
+            }
+            if n > 150 {
+                after.store(busy.peak.load(Ordering::SeqCst), Ordering::SeqCst);
+            }
+        });
+        assert_ne!(
+            switched.load(Ordering::SeqCst),
+            usize::MAX,
+            "the switch ran"
+        );
+        let peak_after = after.load(Ordering::SeqCst);
+        assert!(
+            peak_after <= 2,
+            "{peak_after} threads busy after the switch to 2"
+        );
+        assert!(peak_after >= 1);
     }
 }

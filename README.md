@@ -99,6 +99,10 @@ raised or removed with `--no-limits`. The same keys exist under `[limits]` in th
   a hungry level gets fewer workers instead of more memory (`--stats` shows `mem_budget_bytes`,
   `mem_encoder_bytes` and `mem_reserved_peak_bytes`). Measured on the 851 MiB mixed set:
   [docs/reports/zip-upgrade.md](docs/reports/zip-upgrade.md).
+- Zip creation never runs more threads than the profile allows. The calling thread counts as
+  one while it streams a big file, so with `-j N` (or the profile's ceiling) at most N threads
+  work at any moment, and a live switch to a lower ceiling is followed by the next claim
+  (jobs already running finish). `--stats` shows the most threads seen busy as `active_peak`.
 - The limits follow the **total** RAM and the read-ahead the **free** RAM. A limit decides
   whether an operation is refused, so the same archive must get the same answer on a busy and
   on an idle machine; the read-ahead only trades speed for memory, so it may follow what is free.

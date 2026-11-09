@@ -290,6 +290,21 @@ and the serial path cuts at the I/O buffer where the pipeline writes a prepared 
 1 MiB whole. Not changed here (no change of archive bytes); it means the bytes depend on the
 thread count, which a user comparing archives made with different profiles will see.
 
+## Thread ceiling
+
+Before, while the calling thread streamed a big entry, the workers kept running, so up to
+threads + 1 threads were busy. Now the calling thread counts as busy while it handles an inline
+item: workers start a job only when `working + sink_busy < ceiling`, and the calling thread
+waits for a free place before it starts one (no new job starts meanwhile, so it is not starved).
+The ceiling is read again every 10 ms, so a switch of profile through `Control` applies to the
+next claim; jobs already running finish after a downward switch.
+
+Checked by `crates/core/src/pipeline.rs` tests (the calling thread counts against the ceiling;
+a live switch to a lower ceiling is followed) and `crates/core/tests/stats.rs` (zip creation
+under every profile: `active_peak` never above the threads of the profile, same bytes).
+Mixed 851 MiB set, 2 CPUs, Fast, interleaved A/B: 11.85 s before, 11.44 s after (no
+regression; the limit is 3%), `active_peak` 2.
+
 ## Encrypted zip: why it is slow, and 7z for comparison
 
 Cause, checked in the crate source and by measurement. `zip` 9.1.3 `src/aes.rs` derives the key

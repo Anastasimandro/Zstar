@@ -280,7 +280,8 @@ fn a_cancelled_or_failed_file_is_not_counted_as_done() {
     assert_eq!((s.files, s.renames, s.latency_p50), (0, 0, None), "{s:?}");
 }
 
-/// Zip creation under each profile and under a tiny amount of free RAM: the same bytes and the memory the pipeline reserved
+/// Zip creation under each profile and under a tiny amount of free RAM: the same bytes, the
+/// threads busy at once within the profile's limit, and the memory the pipeline reserved
 /// within the budget it reported (which shrinks with the profile).
 #[test]
 fn zip_creation_keeps_its_thread_ceiling_and_memory_budget_in_every_profile() {
@@ -332,12 +333,17 @@ fn zip_creation_keeps_its_thread_ceiling_and_memory_budget_in_every_profile() {
         (Profile::Gentle, None),
         (Profile::Fast, Some(64 << 20)), // a device with 64 MiB free
     ] {
-        let (bytes, s, _) = make(profile, free);
+        let (bytes, s, threads) = make(profile, free);
         assert!(
             bytes == reference,
             "{profile:?}/{free:?}: archive bytes changed"
         );
         assert!(s.mem_budget > 0, "{profile:?}: the budget is reported");
+        assert!(
+            s.active_peak as usize <= threads.max(1),
+            "{profile:?}/{free:?}: {} threads busy at once, limit {threads}",
+            s.active_peak
+        );
         assert!(
             s.mem_reserved_peak + s.mem_encoder <= s.mem_budget.max(4 << 20),
             "{profile:?}/{free:?}: reserved {} + state {} over budget {}",

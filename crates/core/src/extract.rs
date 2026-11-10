@@ -243,7 +243,8 @@ impl<'a> Session<'a> {
         })?;
         loop {
             self.check_stop()?;
-            let n = match src.read(buf) {
+            let want = self.opts.control.chunk_len(buf.len());
+            let n = match src.read(&mut buf[..want]) {
                 Ok(0) => break,
                 Ok(n) => n,
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,

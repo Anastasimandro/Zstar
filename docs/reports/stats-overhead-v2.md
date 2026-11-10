@@ -107,3 +107,18 @@ counters. It is about 131 KB read per entry, which fits two refills of the fixed
 inferred from that size, not measured separately). Here the OS cache served it, so it cost
 little; on a cold HDD it would not. Not changed in this task. It is a first thing to look at in
 the zip A/B (Task 3), where the read buffer is a variable.
+
+## Live flush of the thread tallies (ADR 0012, step 2)
+
+Each working thread now hands its tally to the shared counters every 25 ms at its safe points
+(`Options::check_cancel`), only when stats are on. Release build, same method as above
+(`span_cost`), one thread:
+
+| call | cost |
+| --- | --- |
+| `flush_live`, nothing due | 32 ns |
+| `Timed::read` of 1 byte, stats on (for scale) | 76 ns |
+
+It runs once per request of 4 KiB or more, so it is at most 0.001% of the time of a request of
+128 KiB. The flush itself (a few relaxed adds) happens 40 times a second per thread. Stats off:
+one `Option` check, no clock. Not measured on a real drive; only the call cost is.

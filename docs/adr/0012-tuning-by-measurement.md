@@ -1,6 +1,6 @@
 # 0012: Tuning by measurement, in the foreground and in the background
 
-- Status: Accepted (step 1: the pure tuner and its simulator; wiring is the next step)
+- Status: Accepted (steps 1 and 2 done: the pure tuner and its simulator, live stats and the governor; sys hygiene, probes and Android are next)
 - Date: 2026-11-09
 - Changes: section 5 (engine) of [`../DECISIONS.md`](../DECISIONS.md); supersedes the gates of Parts A to D of [0010](0010-measure-first-adaptive-io.md); builds on [0008](0008-control-handle-and-profiles.md), [0009](0009-drive-detection-and-thread-priority.md) and [0011](0011-evidence-bounded-metadata-zip-ab.md)
 
@@ -74,8 +74,20 @@ which matters most when the user leaves an operation running in the background.
 ## Build order
 
 1. Pure tuner and simulator with tests (this ADR, done).
-2. Live stats: flush the thread-local tallies of ADR 0011 every ~100 ms; live knobs in `Control`
-   (workers already, then depth and request size at safe points).
+2. Live stats and governor (done): `zstar_core::start_governor` runs a thread that every 100 ms
+   turns the counter deltas into a `Sample`, steps the `Tuner` and puts the answer on the
+   `Control` (`Running::set_mode` and `set_bounds` change the objective and ceilings live).
+   Threads hand their tallies over every 25 ms at `check_cancel`. What is live now:
+   - workers: `Control::set_threads`, at the next file or wave, as before;
+   - request size: `Control::set_chunk`, at the next request, in the extraction copy loop and in
+     single-file creation; the buffers are allocated at `Control::set_chunk_ceiling` (the
+     tuner's `max_chunk`, which the caller derives from its memory budget);
+   - `io_depth`: stored on the control (`Control::io_depth`); its consumer is the bounded
+     writeback of step 3 (a worker may have this many requests written and not yet handed to
+     the drive). This engine reads and writes synchronously, so a deeper queue is not a
+     separate read-ahead.
+   Not live yet: the zip creation pieces, which keep the buffer they start with because the
+   pipeline promises identical bytes for the batched and the streaming path.
 3. `crates/sys` I/O hygiene: page cache drop (`posix_fadvise(DONTNEED)`) and bounded writeback.
 4. `crates/sys` probes: idle time, battery, memory pressure; per-volume memory in the cli.
 5. Android: foreground service, resumable operations.

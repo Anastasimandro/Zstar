@@ -160,6 +160,8 @@ struct Counters {
     read_bytes: AtomicU64,
     write_ns: AtomicU64,
     write_bytes: AtomicU64,
+    /// `read` and `write` calls on the timed adapters.
+    io_ops: AtomicU64,
     codec_cpu_ns: AtomicU64,
     op_ns: AtomicU64,
     threads_pool: AtomicU64,
@@ -290,48 +292,104 @@ pub(crate) fn fs<T>(stats: Option<&Stats>, op: FsOp, f: impl FnOnce() -> T) -> T
     timed(stats, op.class(), f)
 }
 
-/// The share of the time of one thread that [`Lane::drop`] will add to the counters. A
-/// thread keeps one for as long as it works; the calling thread's is [`timed_op`].
-pub(crate) struct Lane(Option<LaneState>);
+/// How often a working thread hands what it tallied to the shared counters, so that a reader
+/// sees the parts of thread time while the operation runs and not only when a thread ends.
+const LIVE_EVERY: Duration = Duration::from_millis(25);
+
+/// The share of the time of one thread that is added to the counters, in pieces while it
+/// works (see [`flush_live`]) and the rest when the guard drops. A thread keeps one for as
+/// long as it works; the calling thread's is [`timed_op`].
+///
+/// The state lives in a thread-local stack, so the safe points that have no handle to the lane
+/// can still flush it. The guard stays on its thread.
+pub(crate) struct Lane(bool, std::marker::PhantomData<*const ()>);
 
 struct LaneState {
     stats: Stats,
-    start: Instant,
+    /// Start of the part not yet added to the counters.
+    since: Instant,
+    /// What `ACC` held at `since`.
     base: Acc,
 }
 
-/// Starts the tally of the calling thread. With stats off it is one branch and no clock.
-pub(crate) fn lane(stats: Option<&Stats>) -> Lane {
-    Lane(stats.map(|s| LaneState {
-        stats: s.clone(),
-        start: Instant::now(),
-        base: ACC.with(Cell::get),
-    }))
-}
-
-impl Drop for Lane {
-    fn drop(&mut self) {
-        let Some(l) = self.0.take() else { return };
-        let (now, c) = (ACC.with(Cell::get), &*l.stats.0);
+impl LaneState {
+    /// Adds the part since the last flush to the counters and starts the next one.
+    fn flush(&mut self, now: Instant) {
+        let (acc, c) = (ACC.with(Cell::get), &*self.stats.0);
         let part = |a: u64, b: u64| a.saturating_sub(b);
         let (input, output) = (
-            part(now.input, l.base.input),
-            part(now.output, l.base.output),
+            part(acc.input, self.base.input),
+            part(acc.output, self.base.output),
         );
         let (workers, finish) = (
-            part(now.workers, l.base.workers),
-            part(now.finish, l.base.finish),
+            part(acc.workers, self.base.workers),
+            part(acc.finish, self.base.finish),
         );
-        let parked = part(now.parked, l.base.parked);
-        let idle = part(now.idle, l.base.idle);
-        let elapsed = nanos(l.start.elapsed());
+        let parked = part(acc.parked, self.base.parked);
+        let idle = part(acc.idle, self.base.idle);
+        let elapsed = nanos(now.saturating_duration_since(self.since));
         let busy = elapsed.saturating_sub(input + output + workers + finish + parked + idle);
         c.busy_ns.fetch_add(busy, Relaxed);
         c.wait_input_ns.fetch_add(input, Relaxed);
         c.wait_output_ns.fetch_add(output, Relaxed);
         c.wait_workers_ns.fetch_add(workers, Relaxed);
         c.finish_ns.fetch_add(finish, Relaxed);
+        self.since = now;
+        self.base = acc;
     }
+}
+
+thread_local! {
+    /// The lanes of this thread, innermost last.
+    static LANES: std::cell::RefCell<Vec<LaneState>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Starts the tally of the calling thread. With stats off it is one branch and no clock.
+pub(crate) fn lane(stats: Option<&Stats>) -> Lane {
+    let Some(s) = stats else {
+        return Lane(false, std::marker::PhantomData);
+    };
+    LANES.with(|l| {
+        l.borrow_mut().push(LaneState {
+            stats: s.clone(),
+            since: Instant::now(),
+            base: ACC.with(Cell::get),
+        });
+    });
+    Lane(true, std::marker::PhantomData)
+}
+
+impl Drop for Lane {
+    fn drop(&mut self) {
+        if self.0 {
+            LANES.with(|l| {
+                if let Some(mut state) = l.borrow_mut().pop() {
+                    state.flush(Instant::now());
+                }
+            });
+        }
+    }
+}
+
+/// Hands the calling thread's tally to the counters if the last time was long enough ago.
+/// Call it at a safe point, between spans (it does nothing inside one, which has not added its
+/// time yet). With no lane on the thread it is one thread-local read.
+pub(crate) fn flush_live() {
+    if IN_SPAN.with(Cell::get) {
+        return;
+    }
+    LANES.with(|l| {
+        let mut lanes = l.borrow_mut();
+        if lanes.is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        for state in lanes.iter_mut() {
+            if now.saturating_duration_since(state.since) >= LIVE_EVERY {
+                state.flush(now);
+            }
+        }
+    });
 }
 
 /// Which part of the operation took the most thread time. See the module docs.
@@ -378,6 +436,8 @@ pub struct StatsSnapshot {
     pub read_bytes: u64,
     pub write: Duration,
     pub write_bytes: u64,
+    /// `read` and `write` calls behind `read` and `write`.
+    pub io_ops: u64,
     pub codec_cpu: Duration,
     pub op: Duration,
     pub parked: Duration,
@@ -464,6 +524,7 @@ impl Stats {
             read_bytes: c.read_bytes.load(Relaxed),
             write: Duration::from_nanos(c.write_ns.load(Relaxed)),
             write_bytes: c.write_bytes.load(Relaxed),
+            io_ops: c.io_ops.load(Relaxed),
             codec_cpu: Duration::from_nanos(c.codec_cpu_ns.load(Relaxed)),
             op: Duration::from_nanos(c.op_ns.load(Relaxed)),
             parked,
@@ -494,12 +555,14 @@ impl Stats {
     pub(crate) fn add_read(&self, d: Duration, bytes: u64) {
         self.0.read_ns.fetch_add(nanos(d), Relaxed);
         self.0.read_bytes.fetch_add(bytes, Relaxed);
+        self.0.io_ops.fetch_add(1, Relaxed);
         add_acc_unless_span(Class::Input, nanos(d));
     }
 
     pub(crate) fn add_write(&self, d: Duration, bytes: u64) {
         self.0.write_ns.fetch_add(nanos(d), Relaxed);
         self.0.write_bytes.fetch_add(bytes, Relaxed);
+        self.0.io_ops.fetch_add(1, Relaxed);
         add_acc_unless_span(Class::Output, nanos(d));
     }
 
@@ -936,6 +999,9 @@ mod tests {
         });
         per("time_file, stats on", &mut || {
             let _ = time_file(Some(&on), || Ok(()));
+        });
+        per("flush_live, not due", &mut || {
+            flush_live();
         });
         let mut b = [0u8; 1];
         let mut plain = Timed::new(io::repeat(0), None);

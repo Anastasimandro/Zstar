@@ -171,7 +171,8 @@ impl ArchiveFormat for SingleFormat {
                     let mut buf = vec![0u8; opts.io_buffer()];
                     loop {
                         opts.check_cancel()?;
-                        let n = read_chunk(&mut file, &mut buf)?;
+                        let want = opts.control.chunk_len(buf.len());
+                        let n = read_chunk(&mut file, &mut buf[..want])?;
                         if n == 0 {
                             break;
                         }

@@ -37,6 +37,7 @@ mod error;
 mod extract;
 mod format;
 mod formats;
+mod govern;
 mod options;
 mod path;
 #[cfg(feature = "zip")]
@@ -57,6 +58,9 @@ pub use detect::{detect, detect_named};
 pub use error::{Error, LimitKind, Result};
 pub use extract::Summary;
 pub use format::{ArchiveFormat, EntryInfo, EntryKind, Format, ReadSeek, WriteSeek, handler};
+pub use govern::{
+    Governor, Running, Signals, SignalsHook, TICK, apply as apply_knobs, start as start_governor,
+};
 pub use options::{Limits, OpenHook, Options, Password, Progress, ProgressFn, ZipMethod};
 pub use path::sanitize as sanitize_entry_name;
 pub use profile::{DriveKind, Profile, Settings, settings_for};

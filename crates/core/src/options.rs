@@ -288,9 +288,13 @@ impl Options {
         self.workers().active()
     }
 
-    /// Size of the buffer files are copied through.
+    /// Size of the buffer files are copied through: the control's ceiling when the caller set
+    /// one (so a live chunk size has room to grow), else what the profile says.
     pub(crate) fn io_buffer(&self) -> usize {
-        self.settings().buffer
+        match self.control.chunk_ceiling() {
+            0 => self.settings().buffer,
+            ceiling => ceiling,
+        }
     }
 
     /// The workers of an operation. The pool is every CPU (or `threads`), whatever the
@@ -376,6 +380,9 @@ impl Options {
     pub(crate) fn check_cancel(&self) -> Result<()> {
         if self.control.is_cancelled() {
             return Err(Error::Cancelled);
+        }
+        if self.stats.is_some() {
+            crate::stats::flush_live();
         }
         if let Some(hook) = &self.worker_hook {
             self.control.sync_priority(hook, self.settings().priority);

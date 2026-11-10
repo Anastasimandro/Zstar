@@ -32,6 +32,8 @@ pub enum Priority {
 /// Called on the thread that is about to work, with the priority it should run at.
 pub type WorkerHook = Arc<dyn Fn(Priority) + Send + Sync>;
 
+/// The smallest request a live chunk size can ask for.
+const MIN_CHUNK: usize = 4096;
 /// Credit the throughput limit lets build up while idle: 50 ms worth of data.
 const BURST_NS: u64 = 50_000_000;
 /// Longest single sleep while throttled, so changes and cancellation are noticed quickly.
@@ -62,6 +64,13 @@ struct Inner {
     epoch: Instant,
     /// Nanoseconds workers have slept because of the rate or thread limit, summed over threads.
     parked_ns: AtomicU64,
+    /// Bytes per read or write request; 0 means the whole copy buffer.
+    chunk: AtomicUsize,
+    /// Size of the copy buffers an operation allocates when it starts; 0 means what the
+    /// profile says. The most `chunk` can ever be.
+    chunk_ceiling: AtomicUsize,
+    /// Requests allowed in flight (written but not yet handed to the drive); 0 means no limit.
+    io_depth: AtomicUsize,
 }
 
 impl Default for Control {
@@ -82,7 +91,54 @@ impl Control {
             empty_at: AtomicU64::new(0),
             epoch: Instant::now(),
             parked_ns: AtomicU64::new(0),
+            chunk: AtomicUsize::new(0),
+            chunk_ceiling: AtomicUsize::new(0),
+            io_depth: AtomicUsize::new(0),
         }))
+    }
+
+    /// Sets the size of the copy buffers an operation allocates when it starts, which is the
+    /// most [`set_chunk`](Self::set_chunk) can ever ask for. Set it before the operation: the
+    /// caller picks it from its memory budget. `0` goes back to the profile's buffer.
+    pub fn set_chunk_ceiling(&self, bytes: usize) {
+        self.0.chunk_ceiling.store(bytes, Relaxed);
+    }
+
+    /// The size set with [`set_chunk_ceiling`](Self::set_chunk_ceiling); `0` if the profile
+    /// decides.
+    pub fn chunk_ceiling(&self) -> usize {
+        self.0.chunk_ceiling.load(Relaxed)
+    }
+
+    /// Sets how many bytes one read or write request moves, from the next one on. It cannot
+    /// exceed the buffer the operation allocated. `0` uses the whole buffer. Takes effect at
+    /// the next request, not in the middle of one, and never changes what is written.
+    pub fn set_chunk(&self, bytes: usize) {
+        self.0.chunk.store(bytes, Relaxed);
+    }
+
+    /// The size set with [`set_chunk`](Self::set_chunk); `0` means the whole buffer.
+    pub fn chunk(&self) -> usize {
+        self.0.chunk.load(Relaxed)
+    }
+
+    /// The part of a buffer of `len` bytes a request uses now: at least 4 KiB (or `len` when
+    /// that is smaller) and at most `len`.
+    pub(crate) fn chunk_len(&self, len: usize) -> usize {
+        match self.chunk() {
+            0 => len,
+            bytes => bytes.clamp(MIN_CHUNK.min(len), len),
+        }
+    }
+
+    /// Limits how many requests may be in flight at once, per worker. `0` removes the limit.
+    pub fn set_io_depth(&self, depth: usize) {
+        self.0.io_depth.store(depth, Relaxed);
+    }
+
+    /// The limit set with [`set_io_depth`](Self::set_io_depth); `0` means none.
+    pub fn io_depth(&self) -> usize {
+        self.0.io_depth.load(Relaxed)
     }
 
     /// Request cancellation. Safe to call from any thread or a signal handler thread.

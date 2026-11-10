@@ -353,6 +353,11 @@ impl Tuner {
         self.mode
     }
 
+    /// The ceilings in force.
+    pub fn bounds(&self) -> TuneBounds {
+        self.bounds
+    }
+
     /// The knobs the last finished trial settled on outside [`Mode::BackgroundActive`], to
     /// remember per volume.
     pub fn best(&self) -> Option<Knobs> {

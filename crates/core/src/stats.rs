@@ -710,7 +710,7 @@ impl<T: Seek> Seek for Timed<T> {
 }
 
 /// A source file as the formats read it: a plain `File` with its reads timed.
-pub(crate) type Source = Timed<File>;
+pub(crate) type Source = crate::hygiene::Hygienic<Timed<File>>;
 
 #[cfg(test)]
 mod tests {

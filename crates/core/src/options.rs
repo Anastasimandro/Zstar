@@ -5,8 +5,9 @@ use std::sync::Arc;
 
 use crate::control::{Control, WorkerHook, Workers};
 use crate::error::{Error, LimitKind, Result};
+use crate::hygiene::{CacheHook, Hygienic};
 use crate::profile::{DriveKind, Profile, Settings, cpus, settings_for};
-use crate::stats::{Source, Stats, StatsSnapshot, Timed};
+use crate::stats::{Source, Stats, StatsSnapshot};
 
 /// A snapshot of how far an operation has got.
 #[derive(Debug, Clone, Copy)]
@@ -238,6 +239,10 @@ pub struct Options {
     /// hook fails the file is opened plainly, so a hint that cannot be given never fails an
     /// operation.
     pub open_hook: Option<OpenHook>,
+    /// Told about stretches of big files the engine is done with, so the OS can write them out
+    /// and forget them (see [`CacheHook`]). `None` leaves the page cache alone. Core makes no
+    /// OS calls: the caller turns each request into one.
+    pub cache_hook: Option<CacheHook>,
     /// Timing counters for one operation; `None` (the default) measures nothing. Clones share
     /// them, so keep one to read the totals afterwards (see [`stats_snapshot`](Self::stats_snapshot)).
     pub stats: Option<Stats>,
@@ -269,6 +274,7 @@ impl Default for Options {
             available_ram: None,
             worker_hook: None,
             open_hook: None,
+            cache_hook: None,
             stats: None,
             progress: None,
             name_hint: None,
@@ -352,7 +358,7 @@ impl Options {
                 None => File::open(path),
             },
         )?;
-        Ok(Timed::new(file, self.stats.clone()))
+        Ok(Hygienic::open(file, self, false))
     }
 
     /// The totals of [`stats`](Self::stats) so far, with the time workers spent parked by the

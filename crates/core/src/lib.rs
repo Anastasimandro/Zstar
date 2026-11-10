@@ -38,6 +38,7 @@ mod extract;
 mod format;
 mod formats;
 mod govern;
+mod hygiene;
 mod options;
 mod path;
 #[cfg(feature = "zip")]
@@ -61,6 +62,7 @@ pub use format::{ArchiveFormat, EntryInfo, EntryKind, Format, ReadSeek, WriteSee
 pub use govern::{
     Governor, Running, Signals, SignalsHook, TICK, apply as apply_knobs, start as start_governor,
 };
+pub use hygiene::{CacheHook, CacheOp};
 pub use options::{Limits, OpenHook, Options, Password, Progress, ProgressFn, ZipMethod};
 pub use path::sanitize as sanitize_entry_name;
 pub use profile::{DriveKind, Profile, Settings, settings_for};
@@ -161,7 +163,7 @@ fn create_file_inner(
     let written = stats::fs(st, stats::FsOp::CreateOut, || File::create(&part))
         .map_err(Error::from)
         .and_then(|file| {
-            let mut file = stats::Timed::new(file, opts.stats.clone());
+            let mut file = hygiene::Hygienic::open(file, opts, true);
             // The tree is walked on a helper thread while the format writes.
             sources::with_walk(inputs, &[output_abs, part_abs], opts, |stream| {
                 handler.create_stream(stream, &mut file, opts)

@@ -21,6 +21,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::SystemTime;
 
 use crate::error::{Error, LimitKind, Result};
+use crate::hygiene::{Windows, window_bytes};
 use crate::options::Options;
 use crate::path::sanitize;
 use crate::progress::Tracker;
@@ -241,6 +242,11 @@ impl<'a> Session<'a> {
         let mut file = crate::stats::fs(self.opts.stats.as_ref(), FsOp::CreateOut, || {
             File::create(part)
         })?;
+        let mut windows = self
+            .opts
+            .cache_hook
+            .clone()
+            .map(|hook| Windows::new(hook, true));
         loop {
             self.check_stop()?;
             let want = self.opts.control.chunk_len(buf.len());
@@ -254,6 +260,12 @@ impl<'a> Session<'a> {
             crate::stats::timed_write(self.opts.stats.as_ref(), n as u64, || {
                 file.write_all(&buf[..n])
             })?;
+            if let Some(w) = &mut windows {
+                w.advance(&file, n as u64, window_bytes(&self.opts.control, want));
+            }
+        }
+        if let Some(w) = &mut windows {
+            w.finish(&file);
         }
         #[cfg(unix)]
         if let Some(mode) = mode {

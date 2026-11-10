@@ -1,5 +1,6 @@
 //! OS queries for Zstar: which kind of drive holds a path, real thread priority, a
-//! sequential-read hint for source files, a same-device check and how much memory there is.
+//! sequential-read hint for source files, page-cache hygiene for big transfers, a same-device
+//! check and how much memory there is.
 //!
 //! This crate is independent of `zstar-core` and is the only place in the workspace that may
 //! contain `unsafe`. Detection never spawns a process, never panics and answers `Unknown`
@@ -14,6 +15,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+mod cache;
 #[cfg(target_os = "linux")]
 mod linux;
 mod memory;
@@ -21,6 +23,7 @@ mod rules;
 #[cfg(windows)]
 mod windows;
 
+pub use cache::{CacheOp, cache_op};
 pub use memory::{Ram, ram};
 pub use rules::combine;
 

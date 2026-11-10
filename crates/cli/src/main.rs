@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 
 use lexopt::prelude::*;
 use zstar_core::{
-    DriveKind, EntryKind, Error, Format, LimitKind, Options, Password, Priority, Profile, Stats,
-    StatsSnapshot, ZipMethod,
+    CacheOp, DriveKind, EntryKind, Error, Format, LimitKind, Options, Password, Priority, Profile,
+    Stats, StatsSnapshot, ZipMethod,
 };
 
 /// Release builds set `ZSTAR_VERSION` (see `.github/workflows/release.yml`) so the binary
@@ -47,6 +47,10 @@ COMMON OPTIONS:
         --no-seq-hint      diagnostic: do not give the OS the sequential-read hint when
                            opening files, to compare it on and off with the same binary.
                            The hint is on by default; this changes timing only.
+        --cache-hygiene    write out big files as they are copied and drop them from the
+                           page cache, so a long operation does not fill the cache or pile up
+                           unwritten data (Linux; does nothing elsewhere). Off by default
+                           until measured; it changes timing and memory use only.
     -h, --help             show this help
     -V, --version          show the version
 
@@ -105,6 +109,8 @@ struct Cli {
     stats: bool,
     /// `--no-seq-hint`: do not install the sequential-read open hook.
     no_seq_hint: bool,
+    /// `--cache-hygiene`: write out and drop big transfers from the page cache as they go.
+    cache_hygiene: bool,
 }
 
 fn parse_size(s: &str) -> Result<u64, String> {
@@ -166,6 +172,7 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Cli>, String
     let mut drive_given = false;
     let mut stats = false;
     let mut no_seq_hint = false;
+    let mut cache_hygiene = false;
     let e = |e: lexopt::Error| e.to_string();
     let args: Vec<OsString> = args.into_iter().collect();
     // Flags override the file, so the file is read first: find --config before parsing.
@@ -212,6 +219,7 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Cli>, String
             }
             Long("stats") => stats = true,
             Long("no-seq-hint") => no_seq_hint = true,
+            Long("cache-hygiene") => cache_hygiene = true,
             Short('f') | Long("force") => opts.overwrite = true,
             Short('l') | Long("level") => {
                 opts.level = Some(p.value().map_err(e)?.parse().map_err(e)?)
@@ -319,6 +327,7 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Cli>, String
         drive_given,
         stats,
         no_seq_hint,
+        cache_hygiene,
     }))
 }
 
@@ -587,6 +596,16 @@ fn run(mut cli: Cli) -> Result<(), Error> {
     // out so the hint can be measured on and off with one binary.
     if !cli.no_seq_hint {
         cli.opts.open_hook = Some(Arc::new(zstar_sys::open_sequential));
+    }
+    // Off until measured on real drives; the hint only ever fails quietly.
+    if cli.cache_hygiene {
+        cli.opts.cache_hook = Some(Arc::new(|file, offset, len, op| {
+            let op = match op {
+                CacheOp::StartWriteback => zstar_sys::CacheOp::StartWriteback,
+                CacheOp::Release => zstar_sys::CacheOp::Release,
+            };
+            zstar_sys::cache_op(file, offset, len, op);
+        }));
     }
     if cli.stats {
         cli.opts.stats = Some(Stats::new());

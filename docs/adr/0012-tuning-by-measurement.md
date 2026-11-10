@@ -88,6 +88,11 @@ which matters most when the user leaves an operation running in the background.
      separate read-ahead.
    Not live yet: the zip creation pieces, which keep the buffer they start with because the
    pipeline promises identical bytes for the batched and the streaming path.
-3. `crates/sys` I/O hygiene: page cache drop (`posix_fadvise(DONTNEED)`) and bounded writeback.
+3. I/O hygiene (done, opt-in): `zstar_sys::cache_op` (Linux: `sync_file_range` and
+   `posix_fadvise(DONTNEED)`) behind `Options::cache_hook`; core decides when, in windows of
+   `io_depth` x chunk (module `hygiene`), for extraction output, the archive being created and
+   big sources. `--cache-hygiene` in the cli, off until measured on real drives. On a virtual
+   disk: pending writes 750 MiB -> 4 MiB, cache growth 2.9 GiB -> 13 MiB, same bytes
+   (docs/reports/cache-hygiene.md). Windows, macOS and Android: no calls yet.
 4. `crates/sys` probes: idle time, battery, memory pressure; per-volume memory in the cli.
 5. Android: foreground service, resumable operations.

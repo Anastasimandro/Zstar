@@ -47,8 +47,10 @@ which matters most when the user leaves an operation running in the background.
    knobs.
 7. **Memory per volume:** `Tuner::best` returns the knobs the last finished trial settled on, not
    the fastest window (which favours whatever file mix was streaming); the cli stores them per
-   volume and passes them as `remembered` next time, which skips the slow start. A hint (for
-   example from the drive kind) goes in `Tuner::with_start`, which starts there and still explores.
+   volume (`--tune`, file `volumes.tsv` in the state directory, newest first, 64 volumes) and
+   passes them to `Tuner::with_start` next time: the run starts there and still explores, because
+   a volume key is built from device names the OS may reuse, so a wrong hit costs a few ticks and
+   never a wrong result. `Tuner::new` with `remembered` (skip exploring) is not used by the cli.
 8. **User input** is read before anything else in a tick: an idle tick between files must not
    swallow the one-tick event that ends `BackgroundAway`.
 
@@ -94,5 +96,11 @@ which matters most when the user leaves an operation running in the background.
    big sources. `--cache-hygiene` in the cli, off until measured on real drives. On a virtual
    disk: pending writes 750 MiB -> 4 MiB, cache growth 2.9 GiB -> 13 MiB, same bytes
    (docs/reports/cache-hygiene.md). Windows, macOS and Android: no calls yet.
-4. `crates/sys` probes: idle time, battery, memory pressure; per-volume memory in the cli.
+4. Probes and per-volume memory (done, opt-in): `zstar_sys::{memory_pressure, on_battery,
+   user_idle, process_user_cpu}` (Linux: PSI, sysfs, getrusage; Windows: GetSystemPowerStatus,
+   GetLastInputInfo, GetProcessTimes; `None` elsewhere, never a guess; Linux has no idle probe
+   that works on every desktop). The governor turns idle time into user input and into
+   `BackgroundAway` after 60 s, and halves the worker ceiling on battery. `zstar --tune`
+   (compress and extract) starts it with ceilings from the profile, drive kind and RAM, and
+   saves `Tuner::best` after a successful run. Numbers: `docs/reports/tune-ab.md`.
 5. Android: foreground service, resumable operations.

@@ -8,6 +8,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+mod tuning;
+
 use lexopt::prelude::*;
 use zstar_core::{
     CacheOp, DriveKind, EntryKind, Error, Format, LimitKind, Options, Password, Priority, Profile,
@@ -44,6 +46,11 @@ COMMON OPTIONS:
                            There is no --password flag: it would show up in `ps`.
         --stats            after compress or extract, print a `key: value` block of timings
                            (reading, writing, waiting, MiB/s) to stderr. Off by default.
+        --tune             adjust workers, requests in flight and request size while the
+                           operation runs, backing off when something else uses the disk
+                           or the CPU, and remember the result per drive for the next
+                           run (compress and extract). Never changes the output. Off by
+                           default until measured on real drives.
         --no-seq-hint      diagnostic: do not give the OS the sequential-read hint when
                            opening files, to compare it on and off with the same binary.
                            The hint is on by default; this changes timing only.
@@ -111,6 +118,8 @@ struct Cli {
     no_seq_hint: bool,
     /// `--cache-hygiene`: write out and drop big transfers from the page cache as they go.
     cache_hygiene: bool,
+    /// `--tune`: regulate the operation live and remember the result per volume.
+    tune: bool,
 }
 
 fn parse_size(s: &str) -> Result<u64, String> {
@@ -173,6 +182,7 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Cli>, String
     let mut stats = false;
     let mut no_seq_hint = false;
     let mut cache_hygiene = false;
+    let mut tune = false;
     let e = |e: lexopt::Error| e.to_string();
     let args: Vec<OsString> = args.into_iter().collect();
     // Flags override the file, so the file is read first: find --config before parsing.
@@ -220,6 +230,7 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Cli>, String
             Long("stats") => stats = true,
             Long("no-seq-hint") => no_seq_hint = true,
             Long("cache-hygiene") => cache_hygiene = true,
+            Long("tune") => tune = true,
             Short('f') | Long("force") => opts.overwrite = true,
             Short('l') | Long("level") => {
                 opts.level = Some(p.value().map_err(e)?.parse().map_err(e)?)
@@ -321,6 +332,9 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Cli>, String
     if stats && !matches!(cmd, Cmd::Compress { .. } | Cmd::Extract { .. }) {
         return Err("--stats applies to compress and extract".into());
     }
+    if tune && !matches!(cmd, Cmd::Compress { .. } | Cmd::Extract { .. }) {
+        return Err("--tune applies to compress and extract".into());
+    }
     Ok(Some(Cli {
         cmd,
         opts,
@@ -328,6 +342,7 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Cli>, String
         stats,
         no_seq_hint,
         cache_hygiene,
+        tune,
     }))
 }
 
@@ -607,7 +622,8 @@ fn run(mut cli: Cli) -> Result<(), Error> {
             zstar_sys::cache_op(file, offset, len, op);
         }));
     }
-    if cli.stats {
+    // The governor reads the counters, so tuning turns them on (they are cheap).
+    if cli.stats || cli.tune {
         cli.opts.stats = Some(Stats::new());
     }
     let ctrlc_token = cli.opts.control.clone();
@@ -640,9 +656,21 @@ fn run(mut cli: Cli) -> Result<(), Error> {
             let same = cli
                 .stats
                 .then(|| same_device_all(&archive, inputs.iter().map(PathBuf::as_path)));
+            let tuning = cli.tune.then(|| {
+                tuning::begin(
+                    &cli.opts,
+                    inputs
+                        .iter()
+                        .map(PathBuf::as_path)
+                        .chain([archive.as_path()]),
+                )
+            });
             let began = Instant::now();
             let r = zstar_core::create_file(format, &inputs, &archive, &cli.opts);
             let wall = began.elapsed();
+            if let Some(t) = tuning.flatten() {
+                t.finish(r.is_ok());
+            }
             clear();
             r?;
             if let (Some(same_device), Some(snap)) = (same, cli.opts.stats_snapshot()) {
@@ -668,9 +696,15 @@ fn run(mut cli: Cli) -> Result<(), Error> {
             let same = cli
                 .stats
                 .then(|| same_device_all(&output, [archive.as_path()]));
+            let tuning = cli
+                .tune
+                .then(|| tuning::begin(&cli.opts, [archive.as_path(), output.as_path()]));
             let began = Instant::now();
             let r = zstar_core::extract_file(&archive, &output, &cli.opts);
             let wall = began.elapsed();
+            if let Some(t) = tuning.flatten() {
+                t.finish(r.is_ok());
+            }
             clear();
             let s = r?;
             if let (Some(same_device), Some(snap)) = (same, cli.opts.stats_snapshot()) {

@@ -340,3 +340,38 @@ fn stats_is_refused_where_it_means_nothing() {
     assert!(!o.status.success());
     assert!(stderr(&o).contains("--stats applies to compress and extract"));
 }
+
+#[test]
+fn tune_changes_no_byte_and_is_refused_where_it_means_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path();
+    let state = cwd.join("state");
+    fs::create_dir_all(cwd.join("proj")).unwrap();
+    let body: Vec<u8> = (0..(8u32 << 20)).map(|i| (i % 251) as u8).collect();
+    fs::write(cwd.join("proj/big.bin"), &body).unwrap();
+
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_zstar"))
+            .args(args)
+            .current_dir(cwd)
+            .env("XDG_STATE_HOME", &state)
+            .env("LOCALAPPDATA", &state)
+            .output()
+            .unwrap()
+    };
+    let plain = run(&["compress", "-j", "2", "plain.tar.gz", "proj"]);
+    assert!(plain.status.success(), "{}", stderr(&plain));
+    let tuned = run(&["compress", "--tune", "-j", "2", "tuned.tar.gz", "proj"]);
+    assert!(tuned.status.success(), "{}", stderr(&tuned));
+    assert_eq!(
+        fs::read(cwd.join("plain.tar.gz")).unwrap(),
+        fs::read(cwd.join("tuned.tar.gz")).unwrap()
+    );
+    let out = run(&["extract", "--tune", "-o", "out", "tuned.tar.gz"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(fs::read(cwd.join("out/proj/big.bin")).unwrap(), body);
+
+    let list = run(&["list", "--tune", "tuned.tar.gz"]);
+    assert_eq!(list.status.code(), Some(2));
+    assert!(stderr(&list).contains("--tune"), "{}", stderr(&list));
+}

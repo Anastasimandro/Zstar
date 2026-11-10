@@ -24,6 +24,17 @@ use crate::tune::{Decision, Knobs, Mode, Sample, TuneBounds, Tuner};
 pub const TICK: Duration = Duration::from_millis(100);
 /// A tick shorter than this (a spurious wake-up) is not a sample.
 const MIN_TICK: Duration = Duration::from_millis(50);
+/// Idle time after which the user counts as away.
+pub const AWAY_AFTER: Duration = Duration::from_secs(60);
+
+/// The ceilings on battery: half the workers, so the CPU and the drive stay cooler and the
+/// battery lasts, and the same requests.
+pub fn saving(bounds: TuneBounds) -> TuneBounds {
+    TuneBounds {
+        max_workers: (bounds.max_workers / 2).max(1),
+        ..bounds
+    }
+}
 
 /// What only the OS can tell, read once per tick.
 #[derive(Debug, Clone, Copy, Default)]
@@ -32,6 +43,12 @@ pub struct Signals {
     pub pressure: Option<f64>,
     /// The user touched the machine since the previous tick.
     pub user_input: bool,
+    /// How long ago the user last touched the machine. The governor turns a drop of it into
+    /// `user_input` and switches a background operation to [`Mode::BackgroundAway`] once it
+    /// reaches [`AWAY_AFTER`].
+    pub user_idle: Option<Duration>,
+    /// The machine runs on its battery: the ceilings come down to [`saving`] until it does not.
+    pub on_battery: Option<bool>,
     /// User-mode CPU time of the whole process so far. Its growth between two ticks, set
     /// against the busy time of the workers, shows whether a thread waited for a core.
     pub process_user_cpu: Option<Duration>,
@@ -46,14 +63,24 @@ pub struct Governor {
     tuner: Tuner,
     last: StatsSnapshot,
     last_cpu: Option<Duration>,
+    last_idle: Option<Duration>,
+    /// The ceilings the caller asked for; the tuner has them lowered while on battery.
+    asked: TuneBounds,
+    on_battery: bool,
+    /// What was last handed to the caller to apply.
+    applied: Knobs,
 }
 
 impl Governor {
     pub fn new(tuner: Tuner) -> Self {
         Governor {
+            asked: tuner.bounds(),
+            applied: tuner.knobs(),
             tuner,
             last: StatsSnapshot::default(),
             last_cpu: None,
+            last_idle: None,
+            on_battery: false,
         }
     }
 
@@ -61,8 +88,38 @@ impl Governor {
         &self.tuner
     }
 
-    pub fn tuner_mut(&mut self) -> &mut Tuner {
-        &mut self.tuner
+    /// The ceilings the caller asked for (not the lowered ones on battery).
+    pub fn asked_bounds(&self) -> TuneBounds {
+        self.asked
+    }
+
+    /// Changes what the operation is for.
+    pub fn set_mode(&mut self, mode: Mode) -> Decision {
+        let d = self.tuner.set_mode(mode);
+        self.settle(d)
+    }
+
+    /// Changes the ceilings; on battery they are lowered further.
+    pub fn set_bounds(&mut self, bounds: TuneBounds) -> Decision {
+        self.asked = bounds;
+        let d = self.tuner.set_bounds(self.effective_bounds());
+        self.settle(d)
+    }
+
+    fn effective_bounds(&self) -> TuneBounds {
+        if self.on_battery {
+            saving(self.asked)
+        } else {
+            self.asked
+        }
+    }
+
+    /// Marks `d` as changed when its knobs differ from what the caller last applied, whatever
+    /// moved them (a step, a mode, new ceilings).
+    fn settle(&mut self, mut d: Decision) -> Decision {
+        d.changed = d.knobs != self.applied;
+        self.applied = d.knobs;
+        d
     }
 
     pub fn into_tuner(self) -> Tuner {
@@ -70,7 +127,24 @@ impl Governor {
     }
 
     /// One tick: `elapsed` since the previous one, `now` the counters at its end.
-    pub fn tick(&mut self, elapsed: Duration, now: &StatsSnapshot, signals: Signals) -> Decision {
+    pub fn tick(
+        &mut self,
+        elapsed: Duration,
+        now: &StatsSnapshot,
+        mut signals: Signals,
+    ) -> Decision {
+        if let Some(idle) = signals.user_idle {
+            signals.user_input |= self.last_idle.is_some_and(|before| idle < before);
+            if idle >= AWAY_AFTER && self.tuner.mode() == Mode::BackgroundActive {
+                self.tuner.set_mode(Mode::BackgroundAway);
+            }
+        }
+        self.last_idle = signals.user_idle;
+        let battery = signals.on_battery == Some(true);
+        if battery != self.on_battery {
+            self.on_battery = battery;
+            self.tuner.set_bounds(self.effective_bounds());
+        }
         let cpu = match (signals.process_user_cpu, self.last_cpu) {
             (Some(now), Some(before)) => Some(now.saturating_sub(before)),
             _ => None,
@@ -78,7 +152,8 @@ impl Governor {
         self.last_cpu = signals.process_user_cpu;
         let sample = sample(elapsed, &self.last, now, cpu, signals);
         self.last = *now;
-        self.tuner.step(&sample)
+        let d = self.tuner.step(&sample);
+        self.settle(d)
     }
 }
 
@@ -191,10 +266,10 @@ fn run(
     loop {
         let decision = match rx.recv_timeout(TICK.saturating_sub(last.elapsed())) {
             Ok(Command::Stop) | Err(RecvTimeoutError::Disconnected) => break,
-            Ok(Command::Mode(mode)) => Some(governor.tuner_mut().set_mode(mode)),
+            Ok(Command::Mode(mode)) => Some(governor.set_mode(mode)),
             Ok(Command::Bounds(bounds)) => {
                 control.set_chunk_ceiling(bounds.max_chunk);
-                Some(governor.tuner_mut().set_bounds(bounds))
+                Some(governor.set_bounds(bounds))
             }
             Err(RecvTimeoutError::Timeout) => None,
         };
@@ -219,6 +294,7 @@ fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tune::{Cause, Reason};
 
     fn bounds() -> TuneBounds {
         TuneBounds {
@@ -245,6 +321,7 @@ mod tests {
             pressure: Some(0.2),
             user_input: true,
             process_user_cpu: None,
+            ..Signals::default()
         };
         let s = sample(
             TICK,
@@ -292,6 +369,78 @@ mod tests {
         assert_eq!(g.last_cpu, Some(Duration::from_millis(500)));
         g.tick(TICK, &snap(0, 0, 0, 0), Signals::default());
         assert_eq!(g.last_cpu, None);
+    }
+
+    fn governor(mode: Mode) -> Governor {
+        Governor::new(Tuner::new(mode, bounds(), None))
+    }
+
+    fn idle(secs: u64) -> Signals {
+        Signals {
+            user_idle: Some(Duration::from_secs(secs)),
+            ..Signals::default()
+        }
+    }
+
+    #[test]
+    fn a_long_idle_sends_a_background_operation_away_and_a_touch_brings_it_back() {
+        let mut g = governor(Mode::BackgroundActive);
+        g.tick(TICK, &snap(0, 0, 0, 0), idle(30));
+        assert_eq!(g.tuner().mode(), Mode::BackgroundActive);
+        g.tick(TICK, &snap(0, 0, 0, 0), idle(61));
+        assert_eq!(g.tuner().mode(), Mode::BackgroundAway);
+        // The idle time fell: someone touched the machine.
+        let d = g.tick(TICK, &snap(0, 0, 0, 0), idle(0));
+        assert_eq!(g.tuner().mode(), Mode::BackgroundActive);
+        assert_eq!(d.reason, Reason::Yield(Cause::UserInput));
+    }
+
+    #[test]
+    fn a_foreground_operation_ignores_idle_time() {
+        let mut g = governor(Mode::Foreground);
+        g.tick(TICK, &snap(0, 0, 0, 0), idle(500));
+        g.tick(TICK, &snap(0, 0, 0, 0), idle(0));
+        assert_eq!(g.tuner().mode(), Mode::Foreground);
+    }
+
+    #[test]
+    fn battery_lowers_the_ceilings_and_mains_gives_them_back() {
+        let mut g = governor(Mode::Foreground);
+        let on = |b| Signals {
+            on_battery: Some(b),
+            ..Signals::default()
+        };
+        g.tick(TICK, &snap(0, 0, 0, 0), on(true));
+        assert_eq!(g.tuner().bounds().max_workers, 2);
+        assert!(g.tuner().knobs().workers <= 2);
+        assert_eq!(g.asked_bounds(), bounds());
+        // New ceilings asked for while on battery are lowered too.
+        let wider = TuneBounds {
+            max_workers: 8,
+            ..bounds()
+        };
+        g.set_bounds(wider);
+        assert_eq!(g.tuner().bounds().max_workers, 4);
+        g.tick(TICK, &snap(0, 0, 0, 0), on(false));
+        assert_eq!(g.tuner().bounds(), wider);
+        // No answer from the OS counts as mains.
+        g.tick(TICK, &snap(0, 0, 0, 0), Signals::default());
+        assert_eq!(g.tuner().bounds(), wider);
+    }
+
+    #[test]
+    fn a_change_made_by_the_ceilings_is_reported_as_changed() {
+        let mut g = governor(Mode::Foreground);
+        let first = g.tuner().knobs();
+        assert!(first.workers >= 3, "{first:?}");
+        let d = g.set_bounds(TuneBounds {
+            max_workers: 1,
+            ..bounds()
+        });
+        assert!(d.changed && d.knobs.workers == 1, "{d:?}");
+        // The same ceilings again change nothing.
+        let d = g.set_bounds(g.asked_bounds());
+        assert!(!d.changed, "{d:?}");
     }
 
     #[test]

@@ -19,12 +19,14 @@ mod cache;
 #[cfg(target_os = "linux")]
 mod linux;
 mod memory;
+mod probes;
 mod rules;
 #[cfg(windows)]
 mod windows;
 
 pub use cache::{CacheOp, cache_op};
 pub use memory::{Ram, ram};
+pub use probes::{memory_pressure, on_battery, process_user_cpu, user_idle};
 pub use rules::combine;
 
 /// The kind of drive a path lives on.

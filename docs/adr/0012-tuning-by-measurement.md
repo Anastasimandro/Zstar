@@ -1,6 +1,6 @@
 # 0012: Tuning by measurement, in the foreground and in the background
 
-- Status: Accepted (steps 1 and 2 done: the pure tuner and its simulator, live stats and the governor; sys hygiene, probes and Android are next)
+- Status: Accepted (steps 1 to 4 done: tuner, live stats and governor, cache hygiene, probes and per-volume memory; step 5, Android, waits for the owner, see below)
 - Date: 2026-11-09
 - Changes: section 5 (engine) of [`../DECISIONS.md`](../DECISIONS.md); supersedes the gates of Parts A to D of [0010](0010-measure-first-adaptive-io.md); builds on [0008](0008-control-handle-and-profiles.md), [0009](0009-drive-detection-and-thread-priority.md) and [0011](0011-evidence-bounded-metadata-zip-ab.md)
 
@@ -103,4 +103,8 @@ which matters most when the user leaves an operation running in the background.
    `BackgroundAway` after 60 s, and halves the worker ceiling on battery. `zstar --tune`
    (compress and extract) starts it with ceilings from the profile, drive kind and RAM, and
    saves `Tuner::best` after a successful run. Numbers: `docs/reports/tune-ab.md`.
-5. Android: foreground service, resumable operations.
+5. Android: foreground service, resumable operations. Not started: there is no
+   `platform-android` crate yet, DECISIONS section 7 asks for a spike and the UI ladder first,
+   and a foreground service needs a Java/Kotlin piece (level B or C, owner's approval). The core
+   side is ready for it: the governor takes `Signals` from a hook, so the app feeds battery,
+   thermal and memory state in; the OS probes in `zstar-sys` return `None` on Android today.

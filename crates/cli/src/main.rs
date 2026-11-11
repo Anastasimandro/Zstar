@@ -35,7 +35,8 @@ COMMON OPTIONS:
         --config <FILE>    TOML settings (default: the user config file, if it exists)
     -j, --threads <N>      worker threads (default: from the profile)
         --profile <P>      fast, balanced, gentle or auto (default): how many CPUs to use
-                           and at what priority. Auto picks from the drive kind.
+                           and at what priority. Auto picks from the drive kind. gentle
+                           is the background mode: it always runs with --tune.
         --drive <KIND>     hdd or ssd: the kind of drive the files are on. Without it the
                            OS is asked about every path involved; if it cannot tell (USB,
                            network, RAID, ...) the safe HDD rules apply (one file at a
@@ -335,6 +336,10 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Cli>, String
     if tune && !matches!(cmd, Cmd::Compress { .. } | Cmd::Extract { .. }) {
         return Err("--tune applies to compress and extract".into());
     }
+    // Gentle only works as a background mode with the tuner yielding to the user (ADR 0012).
+    let tune = tune
+        || (opts.profile == Profile::Gentle
+            && matches!(cmd, Cmd::Compress { .. } | Cmd::Extract { .. }));
     Ok(Some(Cli {
         cmd,
         opts,
@@ -820,6 +825,10 @@ mod tests {
             (c.opts.profile, c.opts.drive),
             (Profile::Gentle, DriveKind::Hdd)
         );
+        assert!(c.tune, "gentle implies --tune");
+        assert!(!parse(args("extract a.zip")).unwrap().unwrap().tune);
+        let c = parse(args("list --profile gentle a.zip")).unwrap().unwrap();
+        assert!(!c.tune, "list has nothing to tune and must not fail");
 
         let c = parse(args("extract -o dest --max-size 1M --max-ratio 0 a.zip"))
             .unwrap()

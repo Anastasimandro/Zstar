@@ -108,3 +108,34 @@ which matters most when the user leaves an operation running in the background.
    and a foreground service needs a Java/Kotlin piece (level B or C, owner's approval). The core
    side is ready for it: the governor takes `Signals` from a hook, so the app feeds battery,
    thermal and memory state in; the OS probes in `zstar-sys` return `None` on Android today.
+
+## Update 2026-11-12: real HDD measurements and what follows from them
+
+Windows 10, SATA HDD, `drive-info` says `unknown` (the seek-penalty query fails with os error 31,
+see ADR 0009). Wall time without the tuner, then with it:
+
+| case | no tuner | tuner | result |
+| --- | --- | --- | --- |
+| 1 GiB, one file | 119 s | 65 s | tuner wins (-45%) |
+| gentle, 20,000 files of 16 KiB, user active; mean of 2 runs per side | 464 s | 189 s | tuner wins (-59%) |
+| normal, 20,000 small files, warm cache; 2 of 3 runs | 15 to 16 s | 22 to 24 s | tuner loses (about +45%) |
+| cold cache, small files | 54 / 403 / 504 s | erratic with and without it | no conclusion: `wait_input` about 90%, `read_ms` only about 3 s |
+
+Decisions:
+
+1. **Normal profile: tuner off by default, on only for large files.** Provisional rule: average
+   file size of at least 1 MiB, kept as one constant. The small-file regression is not explained
+   yet and is not fixed blind. *Status: decided, not implemented.* The average is not known when
+   the tuner would have to start (the tree is walked while the format writes; extraction knows
+   totals only for formats with a central directory), so the mechanism is open and waits for the
+   owner.
+2. **Background mode is gentle and the tuner, always together.** `--profile gentle` implies
+   `--tune` for compress and extract; there is no standalone gentle. *Done.*
+3. **Diagnose, do not fix.** `--stats` (version 4) adds the time inside open and stat calls and
+   the slowest of each (`fs_open_ms`, `fs_open_max_ms`, `fs_stat_ms`, `fs_stat_max_ms`), and every
+   knob change of the tuner with its reason (`tuner_changes`, `tuner_change_<n>`). They are
+   there to explain the small-file loss and the cold `wait_input`. *Done.*
+4. **Drive detection.** The seek-penalty failure has no confirmed fallback yet; `drive-info` now
+   prints two other properties when it fails (ADR 0009). *Diagnostic only.*
+
+Until 1 is implemented the tuner stays opt-in (`--tune`) outside gentle, as before.

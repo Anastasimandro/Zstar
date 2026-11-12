@@ -194,7 +194,7 @@ fn stats_value<'a>(block: &'a [(String, String)], key: &str) -> &'a str {
     &block.iter().find(|(k, _)| k == key).unwrap().1
 }
 
-const STATS_KEYS: [&str; 41] = [
+const STATS_KEYS: [&str; 46] = [
     "stats_version",
     "operation",
     "format",
@@ -236,6 +236,11 @@ const STATS_KEYS: [&str; 41] = [
     "mem_encoder_bytes",
     "mem_reserved_peak_bytes",
     "active_peak",
+    "fs_open_ms",
+    "fs_open_max_ms",
+    "fs_stat_ms",
+    "fs_stat_max_ms",
+    "tuner_changes",
 ];
 
 #[test]
@@ -269,7 +274,19 @@ fn stats_block_is_stable_parses_and_is_absent_without_the_flag() {
     assert_eq!(stats_value(&block, "bytes_in"), "50000");
     assert_eq!(stats_value(&block, "same_device"), "yes");
     assert_eq!(stats_value(&block, "drive_source"), "detected");
-    for key in ["wall_ms", "read_ms", "write_ms", "other_ms", "parked_ms"] {
+    assert_eq!(stats_value(&block, "stats_version"), "4");
+    assert_eq!(stats_value(&block, "tuner_changes"), "n/a");
+    for key in [
+        "wall_ms",
+        "read_ms",
+        "write_ms",
+        "other_ms",
+        "parked_ms",
+        "fs_open_ms",
+        "fs_open_max_ms",
+        "fs_stat_ms",
+        "fs_stat_max_ms",
+    ] {
         stats_value(&block, key).parse::<f64>().unwrap();
     }
     // The flag only reports: the archive is the same byte for byte.
@@ -291,6 +308,51 @@ fn stats_block_is_stable_parses_and_is_absent_without_the_flag() {
     assert_eq!(stats_value(&block, "operation"), "extract");
     assert_eq!(stats_value(&block, "bytes_out"), "50000");
     assert_eq!(stats_value(&block, "format"), "detected");
+}
+
+#[test]
+fn stats_list_the_tuner_changes_when_it_ran_and_gentle_runs_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join("proj")).unwrap();
+    fs::write(cwd.join("proj/a.txt"), "alpha".repeat(10_000)).unwrap();
+    let changes = |o: &std::process::Output| {
+        let err = stderr(o);
+        let n = err
+            .lines()
+            .find_map(|l| l.strip_prefix("tuner_changes: "))
+            .unwrap_or_else(|| panic!("no tuner_changes key: {err}"))
+            .to_owned();
+        for l in err.lines().filter(|l| l.starts_with("tuner_change_")) {
+            assert!(
+                l.contains(": at_ms=") && l.contains(" reason=") && l.contains(" workers="),
+                "{l}"
+            );
+        }
+        n
+    };
+    let o = zstar(
+        &[
+            "compress", "--tune", "--stats", "-j", "2", "t.tar.gz", "proj",
+        ],
+        cwd,
+    );
+    assert!(o.status.success(), "{}", stderr(&o));
+    changes(&o).parse::<u64>().unwrap();
+    // Gentle is the background mode: it runs the tuner without being asked.
+    let o = zstar(
+        &[
+            "compress",
+            "--profile",
+            "gentle",
+            "--stats",
+            "g.tar.gz",
+            "proj",
+        ],
+        cwd,
+    );
+    assert!(o.status.success(), "{}", stderr(&o));
+    changes(&o).parse::<u64>().unwrap();
 }
 
 #[test]

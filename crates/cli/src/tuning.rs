@@ -9,7 +9,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use zstar_core::{DriveKind, Knobs, Mode, Options, Profile, Running, TuneBounds, Tuner};
+use zstar_core::{DriveKind, Knobs, Log, Mode, Options, Profile, Running, TuneBounds, Tuner};
 
 /// Volumes kept in the memory file, newest first.
 const KEEP: usize = 64;
@@ -168,13 +168,15 @@ pub fn begin<'a>(opts: &Options, paths: impl IntoIterator<Item = &'a Path>) -> O
 
 impl Tuning {
     /// Stops the governor; after a successful operation keeps the best knobs it found.
-    pub fn finish(self, succeeded: bool) {
+    /// Returns what the governor changed, for `--stats`.
+    pub fn finish(self, succeeded: bool) -> Option<Log> {
         let Tuning { running, key, file } = self;
-        let best = running.stop().and_then(|t| t.best());
-        if let (true, Some(best), Some(file)) = (succeeded, best, file) {
+        let (tuner, log) = running.stop_with_log()?;
+        if let (true, Some(best), Some(file)) = (succeeded, tuner.best(), file) {
             // Not being able to save only costs the head start of the next run.
             let _ = store(&file, &remember(load(&file), &key, best));
         }
+        Some(log)
     }
 }
 

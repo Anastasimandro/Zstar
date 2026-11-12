@@ -445,6 +445,8 @@ struct Report<'a> {
     drive_given: bool,
     same_device: Option<bool>,
     wall: Duration,
+    /// What the tuner changed; `None` when it did not run.
+    tuner: Option<&'a zstar_core::Log>,
 }
 
 /// `Some(true)` only when every input is on the same device as `output`; `Some(false)` as
@@ -462,8 +464,8 @@ fn same_device_all<'a>(output: &Path, inputs: impl IntoIterator<Item = &'a Path>
 }
 
 /// The `--stats` block: one `key: value` per line, durations in milliseconds with three
-/// decimals. Versions 2 and 3 only append keys, so existing keys keep their meaning
-/// and position. `codec_cpu_ms` is `n/a` unless the multi-threaded gzip path ran, and the
+/// decimals. Versions 2, 3 and 4 only append keys, so existing keys keep their meaning
+/// and position. Version 4 adds the open and stat times and the tuner's changes. `codec_cpu_ms` is `n/a` unless the multi-threaded gzip path ran, and the
 /// queue and latency keys are `n/a` for formats that have none. See the docs of
 /// `zstar_core::StatsSnapshot` and the module docs of its `stats` module for what each number
 /// covers.
@@ -492,7 +494,7 @@ fn stats_block(r: &Report<'_>, s: &StatsSnapshot) -> String {
     } else {
         ms(s.codec_cpu)
     };
-    let mut out = String::from("stats_version: 3\n");
+    let mut out = String::from("stats_version: 4\n");
     let mut line = |k: &str, v: String| {
         out.push_str(k);
         out.push_str(": ");
@@ -577,6 +579,41 @@ fn stats_block(r: &Report<'_>, s: &StatsSnapshot) -> String {
     line("mem_encoder_bytes", bytes(s.mem_encoder));
     line("mem_reserved_peak_bytes", bytes(s.mem_reserved_peak));
     line("active_peak", bytes(s.active_peak));
+    // Version 4: time inside open and stat calls (thread-time, and the slowest call), and what
+    // the tuner did. `tuner_changes` is `n/a` when it did not run; each change follows as
+    // `tuner_change_<n>` with its time since the start, why, and the knobs before and after.
+    line("fs_open_ms", ms(s.open));
+    line("fs_open_max_ms", ms(s.open_max));
+    line("fs_stat_ms", ms(s.stat));
+    line("fs_stat_max_ms", ms(s.stat_max));
+    match r.tuner {
+        None => line("tuner_changes", na()),
+        Some(log) => {
+            line(
+                "tuner_changes",
+                (log.changes.len() as u64 + log.dropped).to_string(),
+            );
+            if log.dropped > 0 {
+                line("tuner_changes_unlisted", log.dropped.to_string());
+            }
+            for (i, c) in log.changes.iter().enumerate() {
+                line(
+                    &format!("tuner_change_{}", i + 1),
+                    format!(
+                        "at_ms={} reason={} workers={}>{} io_depth={}>{} chunk={}>{}",
+                        ms(c.at),
+                        c.reason,
+                        c.from.workers,
+                        c.to.workers,
+                        c.from.io_depth,
+                        c.to.io_depth,
+                        c.from.chunk,
+                        c.to.chunk
+                    ),
+                );
+            }
+        }
+    }
     out
 }
 
@@ -673,9 +710,7 @@ fn run(mut cli: Cli) -> Result<(), Error> {
             let began = Instant::now();
             let r = zstar_core::create_file(format, &inputs, &archive, &cli.opts);
             let wall = began.elapsed();
-            if let Some(t) = tuning.flatten() {
-                t.finish(r.is_ok());
-            }
+            let log = tuning.flatten().and_then(|t| t.finish(r.is_ok()));
             clear();
             r?;
             if let (Some(same_device), Some(snap)) = (same, cli.opts.stats_snapshot()) {
@@ -687,6 +722,7 @@ fn run(mut cli: Cli) -> Result<(), Error> {
                     drive_given: cli.drive_given,
                     same_device,
                     wall,
+                    tuner: log.as_ref(),
                 };
                 eprint!("{}", stats_block(&report, &snap));
             }
@@ -707,9 +743,7 @@ fn run(mut cli: Cli) -> Result<(), Error> {
             let began = Instant::now();
             let r = zstar_core::extract_file(&archive, &output, &cli.opts);
             let wall = began.elapsed();
-            if let Some(t) = tuning.flatten() {
-                t.finish(r.is_ok());
-            }
+            let log = tuning.flatten().and_then(|t| t.finish(r.is_ok()));
             clear();
             let s = r?;
             if let (Some(same_device), Some(snap)) = (same, cli.opts.stats_snapshot()) {
@@ -721,6 +755,7 @@ fn run(mut cli: Cli) -> Result<(), Error> {
                     drive_given: cli.drive_given,
                     same_device,
                     wall,
+                    tuner: log.as_ref(),
                 };
                 eprint!("{}", stats_block(&report, &snap));
             }

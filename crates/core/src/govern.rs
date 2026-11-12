@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use crate::control::Control;
 use crate::options::Options;
 use crate::stats::{Stats, StatsSnapshot};
-use crate::tune::{Decision, Knobs, Mode, Sample, TuneBounds, Tuner};
+use crate::tune::{Decision, Knobs, Mode, Reason, Sample, TuneBounds, Tuner};
 
 /// Time between two samples.
 pub const TICK: Duration = Duration::from_millis(100);
@@ -194,11 +194,49 @@ enum Command {
     Stop,
 }
 
+/// Most changes a [`Log`] keeps; later ones are only counted, so memory stays constant.
+pub const MAX_LOGGED: usize = 256;
+
+/// One change of knobs the governor put on the control, for `--stats`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Change {
+    /// Time since the governor started.
+    pub at: Duration,
+    pub from: Knobs,
+    pub to: Knobs,
+    pub reason: Reason,
+}
+
+/// What the governor changed during the operation, oldest first.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Log {
+    pub changes: Vec<Change>,
+    /// Changes after the first [`MAX_LOGGED`], which are not kept.
+    pub dropped: u64,
+}
+
+impl Log {
+    /// Records `d` (a decision that changed the knobs) and moves `prev` on to its knobs.
+    fn note(&mut self, at: Duration, prev: &mut Knobs, d: &Decision) {
+        if self.changes.len() < MAX_LOGGED {
+            self.changes.push(Change {
+                at,
+                from: *prev,
+                to: d.knobs,
+                reason: d.reason,
+            });
+        } else {
+            self.dropped += 1;
+        }
+        *prev = d.knobs;
+    }
+}
+
 /// A governor running on its own thread. Dropping it stops the thread; [`stop`](Self::stop)
 /// also hands the tuner back, to read [`Tuner::best`].
 pub struct Running {
     tx: Sender<Command>,
-    handle: Option<JoinHandle<Tuner>>,
+    handle: Option<JoinHandle<(Tuner, Log)>>,
 }
 
 impl Running {
@@ -213,7 +251,12 @@ impl Running {
     }
 
     /// Stops the thread and returns the tuner, or `None` if the thread died.
-    pub fn stop(mut self) -> Option<Tuner> {
+    pub fn stop(self) -> Option<Tuner> {
+        self.stop_with_log().map(|(tuner, _)| tuner)
+    }
+
+    /// Like [`stop`](Self::stop), with the changes the governor made while it ran.
+    pub fn stop_with_log(mut self) -> Option<(Tuner, Log)> {
         let _ = self.tx.send(Command::Stop);
         self.handle.take()?.join().ok()
     }
@@ -261,8 +304,11 @@ fn run(
     control: &Control,
     mut signals: Option<SignalsHook>,
     rx: &mpsc::Receiver<Command>,
-) -> Tuner {
-    let mut last = Instant::now();
+) -> (Tuner, Log) {
+    let started = Instant::now();
+    let mut last = started;
+    let mut log = Log::default();
+    let mut prev = governor.tuner().knobs();
     loop {
         let decision = match rx.recv_timeout(TICK.saturating_sub(last.elapsed())) {
             Ok(Command::Stop) | Err(RecvTimeoutError::Disconnected) => break,
@@ -275,6 +321,7 @@ fn run(
         };
         if let Some(d) = decision.filter(|d| d.changed) {
             apply(control, d.knobs);
+            log.note(started.elapsed(), &mut prev, &d);
         }
         let elapsed = last.elapsed();
         if elapsed < MIN_TICK {
@@ -286,9 +333,10 @@ fn run(
         let d = governor.tick(elapsed, &snapshot, signals);
         if d.changed {
             apply(control, d.knobs);
+            log.note(started.elapsed(), &mut prev, &d);
         }
     }
-    governor.into_tuner()
+    (governor.into_tuner(), log)
 }
 
 #[cfg(test)]
@@ -461,6 +509,27 @@ mod tests {
     }
 
     #[test]
+    fn the_log_keeps_a_bounded_number_of_changes_and_counts_the_rest() {
+        let k = |w| Knobs {
+            workers: w,
+            io_depth: 1,
+            chunk: 4096,
+        };
+        let (mut log, mut prev) = (Log::default(), k(1));
+        for w in 2..(MAX_LOGGED + 45) {
+            let d = Decision {
+                knobs: k(w),
+                changed: true,
+                reason: Reason::Hold,
+            };
+            log.note(Duration::from_millis(w as u64), &mut prev, &d);
+        }
+        assert_eq!((log.changes.len(), log.dropped), (MAX_LOGGED, 43));
+        assert_eq!(prev, k(MAX_LOGGED + 44));
+        assert_eq!(log.changes[0].from, k(1));
+    }
+
+    #[test]
     fn without_stats_there_is_nothing_to_govern() {
         let tuner = Tuner::new(Mode::Foreground, bounds(), None);
         assert!(start(&Options::default(), tuner, None).unwrap().is_none());
@@ -472,9 +541,9 @@ mod tests {
             stats: Some(Stats::new()),
             ..Options::default()
         };
-        let running = start(&opts, Tuner::new(Mode::Foreground, bounds(), None), None)
-            .unwrap()
-            .unwrap();
+        let tuner = Tuner::new(Mode::Foreground, bounds(), None);
+        let first = tuner.knobs();
+        let running = start(&opts, tuner, None).unwrap().unwrap();
         let lower = TuneBounds {
             max_workers: 1,
             max_io_depth: 2,
@@ -483,7 +552,15 @@ mod tests {
         };
         running.set_bounds(lower);
         running.set_mode(Mode::BackgroundActive);
-        let tuner = running.stop().unwrap();
+        let (tuner, log) = running.stop_with_log().unwrap();
+        // Every change is logged with its reason, in order, and they chain from the first
+        // knobs to the last.
+        assert!(!log.changes.is_empty() && log.dropped == 0, "{log:?}");
+        assert_eq!(log.changes[0].from, first);
+        assert_eq!(log.changes[0].reason, Reason::ModeChange);
+        assert!(log.changes.iter().all(|c| c.from != c.to));
+        assert!(log.changes.windows(2).all(|w| w[0].to == w[1].from));
+        assert_eq!(log.changes.last().unwrap().to, tuner.knobs());
         assert_eq!(tuner.mode(), Mode::BackgroundActive);
         assert_eq!(tuner.bounds(), lower);
         assert_eq!(opts.control.chunk_ceiling(), 256 << 10);

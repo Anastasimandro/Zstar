@@ -38,7 +38,10 @@ asked of the file system:
 - `queue_avg`, `queue_max`: items handed to the workers per gzip wave or zip batch (`n/a` where
   there is no queue).
 - `fs_opens`, `fs_stats`, `fs_mkdirs`, `fs_renames`, `files`, `files_per_s`, `latency_p50_ms`,
-  `latency_p95_ms` (per file, from start to done).
+  `latency_p95_ms` (per file, from start to done); `fs_open_ms`, `fs_stat_ms` and their
+  `_max_ms` give the time inside those calls and the slowest one.
+- `tuner_changes` and `tuner_change_<n>`: what the tuner changed and why, with `--tune` or
+  `--profile gentle` (`n/a` otherwise).
 - `write_completion: buffered`: writes and `finish_ms` hand data to the operating system. Zstar
   never calls `fsync`, so no number here is the time until the data is on the disk.
 

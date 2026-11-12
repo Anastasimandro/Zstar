@@ -40,8 +40,8 @@ there to measure it.
 
 ## What `--stats` prints
 
-A `key: value` block on stderr after a successful compress or extract. `stats_version: 2` only
-appends keys to version 1: the old keys keep their meaning and their order.
+A `key: value` block on stderr after a successful compress or extract. Versions 2 to 4 only
+append keys to version 1: the old keys keep their meaning and their order.
 
 | key | meaning |
 | --- | --- |
@@ -65,6 +65,8 @@ appends keys to version 1: the old keys keep their meaning and their order.
 | `dominant_stage`, `dominant_share_pct` | the largest of `busy`, `wait_input`, `wait_output`, `wait_workers`, `finish`, `parked` (named `cpu`, `wait_input`, ...) and its share of their sum |
 | `queue_avg`, `queue_max` | items handed to workers per gzip wave or zip batch, sampled when it starts; `n/a` without a queue |
 | `fs_opens`, `fs_stats`, `fs_mkdirs`, `fs_renames` | file-system calls made (see `stats.rs` for exactly which); `fs_mkdirs` counts calls, not directories created |
+| `fs_open_ms`, `fs_open_max_ms`, `fs_stat_ms`, `fs_stat_max_ms` | (version 4) time inside the open and stat calls counted above, summed over threads, and the slowest single call; separates a slow metadata phase from slow reads |
+| `tuner_changes`, `tuner_change_<n>` | (version 4) with `--tune` (or `--profile gentle`): how many times the tuner changed the knobs, then each one as `at_ms=<since start> reason=<why> workers=a>b io_depth=a>b chunk=a>b`; at most 256 are listed (`tuner_changes_unlisted` counts the rest). `n/a` when the tuner did not run |
 | `files`, `files_per_s` | regular files completed, and that over `wall_ms` |
 | `latency_p50_ms`, `latency_p95_ms` | per-file time from start to done; upper edge of a histogram bucket, up to 12.5% high; `n/a` when files are not handled one by one (7z creation) |
 | `write_completion` | always `buffered`: nothing waits for the disk |

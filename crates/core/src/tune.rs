@@ -143,6 +143,43 @@ pub enum Reason {
     Fallback,
 }
 
+impl Knob {
+    /// Name as printed by `--stats`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Knob::Workers => "workers",
+            Knob::IoDepth => "io_depth",
+            Knob::Chunk => "chunk",
+        }
+    }
+}
+
+impl Cause {
+    /// Name as printed by `--stats`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Cause::Disk => "disk",
+            Cause::Cpu => "cpu",
+            Cause::Pressure => "pressure",
+            Cause::UserInput => "user_input",
+        }
+    }
+}
+
+impl std::fmt::Display for Reason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Reason::Hold => f.write_str("hold"),
+            Reason::Explore(k) => write!(f, "explore_{}", k.name()),
+            Reason::Keep(k) => write!(f, "keep_{}", k.name()),
+            Reason::Revert(k) => write!(f, "revert_{}", k.name()),
+            Reason::Yield(c) => write!(f, "yield_{}", c.name()),
+            Reason::ModeChange => f.write_str("mode_change"),
+            Reason::Fallback => f.write_str("fallback"),
+        }
+    }
+}
+
 /// The values the tuner decides.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Knobs {

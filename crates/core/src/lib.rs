@@ -60,7 +60,8 @@ pub use error::{Error, LimitKind, Result};
 pub use extract::Summary;
 pub use format::{ArchiveFormat, EntryInfo, EntryKind, Format, ReadSeek, WriteSeek, handler};
 pub use govern::{
-    Governor, Running, Signals, SignalsHook, TICK, apply as apply_knobs, start as start_governor,
+    Change, Governor, Log, MAX_LOGGED, Running, Signals, SignalsHook, TICK, apply as apply_knobs,
+    start as start_governor,
 };
 pub use hygiene::{CacheHook, CacheOp};
 pub use options::{Limits, OpenHook, Options, Password, Progress, ProgressFn, ZipMethod};

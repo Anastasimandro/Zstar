@@ -71,6 +71,10 @@
 //!   are not counted) and the destination checks when extracting. `mkdirs` counts calls to
 //!   create directories whether or not they already existed. `renames` is one per `.part`
 //!   file. Symlinks made at the end of an extraction are not counted.
+//! * `open` / `open_max` and `stat` / `stat_max`: the time inside those same open and stat
+//!   calls, summed over threads, and the slowest single call. Time inside a call that fails
+//!   counts too. Unlike `read`, they cover the calls themselves, so a cold metadata phase (many
+//!   small files on a spinning disk) shows here and not as a slow read.
 //! * `files`: regular files completed (archived or extracted). Directories and links are not
 //!   counted. Divide by wall time for files per second.
 //! * `latency_p50` / `latency_p95`: the time one file took from the moment a thread started
@@ -172,7 +176,11 @@ struct Counters {
     wait_workers_ns: AtomicU64,
     finish_ns: AtomicU64,
     opens: AtomicU64,
+    open_ns: AtomicU64,
+    open_max_ns: AtomicU64,
     stat_calls: AtomicU64,
+    stat_ns: AtomicU64,
+    stat_max_ns: AtomicU64,
     mkdirs: AtomicU64,
     renames: AtomicU64,
     files: AtomicU64,
@@ -284,12 +292,20 @@ pub(crate) fn timed<T>(stats: Option<&Stats>, class: Class, f: impl FnOnce() -> 
     value
 }
 
-/// Runs one file-system call, counting it and timing it as part of its class.
+/// Runs one file-system call, counting it and timing it as part of its class. Opens and stats
+/// also keep their own total and slowest call, so a slow metadata phase shows by itself.
 pub(crate) fn fs<T>(stats: Option<&Stats>, op: FsOp, f: impl FnOnce() -> T) -> T {
-    if let Some(s) = stats {
-        s.count(op, 1);
-    }
-    timed(stats, op.class(), f)
+    let Some(s) = stats else { return f() };
+    s.count(op, 1);
+    // Same span as `timed`, with the one clock reading shared with the per-call figures.
+    let start = Instant::now();
+    let outer = IN_SPAN.with(|c| c.replace(true));
+    let value = f();
+    IN_SPAN.with(|c| c.set(outer));
+    let ns = nanos(start.elapsed());
+    add_acc(op.class(), ns);
+    s.add_call_time(op, ns);
+    value
 }
 
 /// How often a working thread hands what it tallied to the shared counters, so that a reader
@@ -450,7 +466,13 @@ pub struct StatsSnapshot {
     pub wait_workers: Duration,
     pub finish: Duration,
     pub opens: u64,
+    /// Time inside the `opens` calls, summed over threads, and the slowest one.
+    pub open: Duration,
+    pub open_max: Duration,
     pub stat_calls: u64,
+    /// Time inside the `stat_calls`, summed over threads, and the slowest one.
+    pub stat: Duration,
+    pub stat_max: Duration,
     pub mkdirs: u64,
     pub renames: u64,
     /// Regular files completed.
@@ -536,7 +558,11 @@ impl Stats {
             wait_workers: Duration::from_nanos(c.wait_workers_ns.load(Relaxed)),
             finish: Duration::from_nanos(c.finish_ns.load(Relaxed)),
             opens: c.opens.load(Relaxed),
+            open: Duration::from_nanos(c.open_ns.load(Relaxed)),
+            open_max: Duration::from_nanos(c.open_max_ns.load(Relaxed)),
             stat_calls: c.stat_calls.load(Relaxed),
+            stat: Duration::from_nanos(c.stat_ns.load(Relaxed)),
+            stat_max: Duration::from_nanos(c.stat_max_ns.load(Relaxed)),
             mkdirs: c.mkdirs.load(Relaxed),
             renames: c.renames.load(Relaxed),
             files: c.files.load(Relaxed),
@@ -564,6 +590,16 @@ impl Stats {
         self.0.write_bytes.fetch_add(bytes, Relaxed);
         self.0.io_ops.fetch_add(1, Relaxed);
         add_acc_unless_span(Class::Output, nanos(d));
+    }
+
+    fn add_call_time(&self, op: FsOp, ns: u64) {
+        let (sum, max) = match op {
+            FsOp::OpenSrc | FsOp::CreateOut => (&self.0.open_ns, &self.0.open_max_ns),
+            FsOp::StatSrc | FsOp::StatOut => (&self.0.stat_ns, &self.0.stat_max_ns),
+            FsOp::MkdirOut | FsOp::RenameOut => return,
+        };
+        sum.fetch_add(ns, Relaxed);
+        max.fetch_max(ns, Relaxed);
     }
 
     pub(crate) fn count(&self, op: FsOp, n: u64) {
@@ -959,6 +995,27 @@ mod tests {
         assert_eq!((s.opens, s.stat_calls, s.mkdirs, s.renames), (2, 5, 1, 1));
         assert_eq!((s.queue_samples, s.queue_max), (2, 10));
         assert_eq!(s.queue_avg(), Some(7.0));
+    }
+
+    #[test]
+    fn opens_and_stats_keep_their_own_time_and_slowest_call() {
+        let stats = Stats::new();
+        let nap = |ms| std::thread::sleep(Duration::from_millis(ms));
+        fs(Some(&stats), FsOp::OpenSrc, || nap(20));
+        fs(Some(&stats), FsOp::CreateOut, || nap(5));
+        fs(Some(&stats), FsOp::StatSrc, || nap(10));
+        fs(Some(&stats), FsOp::MkdirOut, || nap(5));
+        let s = stats.snapshot(Duration::ZERO);
+        assert_eq!((s.opens, s.stat_calls, s.mkdirs), (2, 1, 1));
+        assert!(s.open >= Duration::from_millis(25), "{s:?}");
+        assert!(s.open_max >= Duration::from_millis(20) && s.open_max <= s.open);
+        assert!(
+            s.stat >= Duration::from_millis(10) && s.stat_max == s.stat,
+            "{s:?}"
+        );
+        // A mkdir is counted but is neither an open nor a stat.
+        assert!(s.open < Duration::from_millis(500));
+        assert_eq!(fs(None, FsOp::OpenSrc, || 3), 3);
     }
 
     /// Not a test: the method behind docs/reports/stats-overhead-v2.md. Run with

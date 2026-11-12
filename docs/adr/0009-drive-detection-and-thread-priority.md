@@ -69,6 +69,32 @@ first method answered, no fallback was needed. **Not verified for a standard use
 needs `zstar drive-info <path>` on a real machine without elevation: a line `fallback: yes` or
 `class: unknown` with an access-denied error in the raw values means the premise failed.
 
+## Windows seek-penalty failure on a SATA HDD (2026-11-12)
+
+On the owner's Windows 10 machine with a SATA HDD, the seek-penalty query fails with `os error 31`
+(`ERROR_GEN_FAILURE`, "a device attached to the system is not functioning") both on the volume and
+on `\\.\PhysicalDrive0`, so `drive-info` says `unknown`. It is not an access problem (that would
+be error 5), and the physical-disk fallback of this ADR fails the same way: the storage stack
+could not get the property from the device, whatever handle asks.
+
+Options looked at, none adopted yet:
+
+- `StorageDeviceTrimProperty` (8): answers a different question (TRIM support), and TRIM is not a
+  test for solid state; the only source consulted calls it a matter of what you are checking for.
+- `StorageDeviceMediumProductType` (15): same zero-access query; it may answer where the seek
+  penalty does not, or may fail for the same reason. The meaning of its values is not confirmed
+  from Microsoft's pages (not fetched), so it is not used to decide.
+- ATA pass-through (IDENTIFY, rotation rate): needs a handle with read and write access, which
+  contradicts the no-administrator rule above.
+- Storage Management / WMI (`MSFT_PhysicalDisk`): COM, a new surface for startup time and size;
+  the owner's decision.
+
+So `probe` now also asks for the trim and medium-product-type values, only when the seek-penalty
+query failed, and prints them in `drive-info` (`trim_enabled <label>`, `medium_product_type
+<label>`). The decision rules did not change. One `drive-info` run on that HDD says whether
+either property answers; if `medium_product_type` does, confirm what its values mean before
+using it. Windows code is checked by CI only; this was written without a Windows toolchain.
+
 ## Windows I/O priority finding
 
 Microsoft's [`SetThreadPriority`](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-setthreadpriority)

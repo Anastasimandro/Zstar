@@ -35,6 +35,8 @@ const FILE_SHARE_ALL: u32 = 7; // read | write | delete
 /// `STORAGE_PROPERTY_ID` values.
 const STORAGE_DEVICE_PROPERTY: u32 = 0;
 const STORAGE_DEVICE_SEEK_PENALTY_PROPERTY: u32 = 7;
+const STORAGE_DEVICE_TRIM_PROPERTY: u32 = 8;
+const STORAGE_DEVICE_MEDIUM_PRODUCT_TYPE_PROPERTY: u32 = 15;
 
 /// A network (SMB) path, in either the `\\server` or the `\\?\UNC\` form.
 fn is_unc(text: &str) -> bool {
@@ -169,19 +171,38 @@ fn property_query(id: u32) -> [u8; 12] {
     q
 }
 
-/// `DEVICE_SEEK_PENALTY_DESCRIPTOR`: version, size, then `IncursSeekPenalty` at byte 8.
-fn seek_penalty(device: &File) -> io::Result<bool> {
+/// A property descriptor that starts with version and size (4 bytes each), as the answer to
+/// `IOCTL_STORAGE_QUERY_PROPERTY`; `need` is how many bytes the caller reads from it.
+fn descriptor(device: &File, id: u32, need: usize) -> io::Result<[u8; 16]> {
     let mut out = [0u8; 16];
     let n = ioctl(
         device,
         IOCTL_STORAGE_QUERY_PROPERTY,
-        &property_query(STORAGE_DEVICE_SEEK_PENALTY_PROPERTY),
+        &property_query(id),
         &mut out,
     )?;
-    if n < 9 {
-        return Err(io::Error::other("short seek-penalty answer"));
+    if n < need {
+        return Err(io::Error::other(format!("short answer ({n} bytes)")));
     }
-    Ok(out[8] != 0)
+    Ok(out)
+}
+
+/// `DEVICE_SEEK_PENALTY_DESCRIPTOR`: version, size, then `IncursSeekPenalty` at byte 8.
+fn seek_penalty(device: &File) -> io::Result<bool> {
+    Ok(descriptor(device, STORAGE_DEVICE_SEEK_PENALTY_PROPERTY, 9)?[8] != 0)
+}
+
+/// `DEVICE_TRIM_DESCRIPTOR`: version, size, then `TrimEnabled` at byte 8. Diagnostic only: a
+/// disk that takes TRIM is not necessarily solid state.
+fn trim_enabled(device: &File) -> io::Result<bool> {
+    Ok(descriptor(device, STORAGE_DEVICE_TRIM_PROPERTY, 9)?[8] != 0)
+}
+
+/// `STORAGE_MEDIUM_PRODUCT_TYPE_DESCRIPTOR`: version, size, then `MediumProductType` (u32) at
+/// byte 8. Diagnostic only: what its values mean is not confirmed from Microsoft's pages.
+fn medium_product_type(device: &File) -> io::Result<u32> {
+    let out = descriptor(device, STORAGE_DEVICE_MEDIUM_PRODUCT_TYPE_PROPERTY, 12)?;
+    Ok(u32::from_ne_bytes([out[8], out[9], out[10], out[11]]))
 }
 
 /// `STORAGE_DEVICE_DESCRIPTOR`: `BusType` at byte 28, `RemovableMedia` at byte 10.
@@ -214,6 +235,20 @@ fn probe(label: &str, device: &File, d: &mut Detection) -> Probe {
         }
         Err(e) => {
             d.raw(&format!("seek_penalty {label}"), format!("error: {e}"));
+            // Seen on a SATA HDD (Windows 10): os error 31 on the volume and on the disk. Show
+            // what two other properties say there, so one `drive-info` run tells whether either
+            // could stand in. Not used for the decision: only asked when this query failed.
+            match trim_enabled(device) {
+                Ok(t) => d.raw(&format!("trim_enabled {label}"), t.to_string()),
+                Err(e) => d.raw(&format!("trim_enabled {label}"), format!("error: {e}")),
+            }
+            match medium_product_type(device) {
+                Ok(m) => d.raw(&format!("medium_product_type {label}"), format!("{m:#06x}")),
+                Err(e) => d.raw(
+                    &format!("medium_product_type {label}"),
+                    format!("error: {e}"),
+                ),
+            }
             None
         }
     };

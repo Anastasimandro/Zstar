@@ -29,9 +29,14 @@ which matters most when the user leaves an operation running in the background.
    time, optional outside pressure, optional user input); it returns the knobs to apply at the
    next safe point. No clock, thread or OS call in it; `#![forbid(unsafe_code)]` holds.
 4. **Throughput:** one knob at a time; a window is 8 ticks after 1 settling tick and its value is
-   the median. Up is kept above +5%; down is kept if it costs under 2%. Fresh start doubles each
-   knob while it pays (slow start); later probes move one step, every ~9 s in the foreground. A
-   change over 25% at the same knobs means the machine changed: explore again.
+   the median. A step is kept above +5%; in the background a step down is also kept if it costs
+   under 2% (same speed, less pressure), but when somebody waits for the result a tie is not
+   kept. Fresh start explores each knob in turn: up doubles while it pays, a worker or request
+   count steps down by a quarter, request size halves; later probes move one step, every ~9 s in
+   the foreground. Nothing is tried before 30 ticks of work (about 3 s), and a trial more than
+   10% below its base is reverted after 3 ticks instead of a whole window. A change over 25% at
+   the same knobs means the machine changed: explore again. *(Changed 2026-11-13, see the update
+   at the end: it used to keep ties, halve counts and start trying at once.)*
 5. **Interference, from our own numbers:** latency per request over 1.5x the typical value at the
    same depth and request size (drive busy), or CPU time under 0.85x of busy time (a thread
    waited for a core), or outside pressure over 0.10. Two contended ticks in a row halve workers
@@ -51,6 +56,8 @@ which matters most when the user leaves an operation running in the background.
    passes them to `Tuner::with_start` next time: the run starts there and still explores, because
    a volume key is built from device names the OS may reuse, so a wrong hit costs a few ticks and
    never a wrong result. `Tuner::new` with `remembered` (skip exploring) is not used by the cli.
+   Without an entry the run starts from the fixed profile of the drive class (update 2026-11-13).
+   Keys start with a version (`v2:`); entries under another version are never found.
 8. **User input** is read before anything else in a tick: an idle tick between files must not
    swallow the one-tick event that ends `BackgroundAway`.
 
@@ -139,3 +146,84 @@ Decisions:
    prints two other properties when it fails (ADR 0009). *Diagnostic only.*
 
 Until 1 is implemented the tuner stays opt-in (`--tune`) outside gentle, as before.
+
+## Update 2026-11-13: the tuner must never lose to the fixed profile
+
+Measured by the owner on NVMe (Windows), wall time without the tuner, then with it: 1 GiB, one
+file, 21.6 s -> 24.4 to 25.6 s; gentle with the user active, 35.7 s -> 43.0 s. On the HDD the tuner
+wins (table above). In the NVMe run the first `tuner_change` started at workers=1, chunk=65536,
+while the fixed profile starts at 4 workers.
+
+**Cause.** Found by reproducing it in the simulator before changing anything (test
+`flat_throughput_leaves_the_knobs_where_they_started_outside_the_background`: it failed, with the
+knobs ending at 1 worker, 1 request and the smallest chunk). When throughput does not depend on
+the knobs (many small files, or a bottleneck elsewhere such as the cost of an open), every step
+down costs under 2% and was kept, and slow start kept halving each knob. Workers, requests in
+flight and request size walked to their floors within about 15 s. `Tuner::best` then returned
+that floor and the cli saved it for the volume (decision 7), so the next run, large files
+included, started at the minimum and spent its first seconds climbing. What is not confirmed: the
+owner's `volumes.tsv` was not inspected; chunk=65536 is the cli's smallest request size, which
+fits.
+
+**Changes.**
+
+1. *Start from the fixed profile.* `tuning::fixed_start`: workers and request size are what the
+   untuned run uses (`Options::settings`: 128 KiB on SSD, 1 MiB on HDD and unknown); the fixed
+   profile has no queue limit, so requests in flight start at the deepest queue the class allows
+   (32, or 4 on HDD and unknown). Used when the volume has no remembered entry. Volume keys now
+   start with `v2:`, so entries saved by the old tuner, which may be floors, are never used.
+2. *Short operations are not explored.* The first trial waits for 30 ticks of work (about 3 s):
+   `EXPLORE_AFTER_TICKS` in `tune.rs`, the one threshold. An operation shorter than that runs
+   entirely on the fixed profile. Interference handling is not delayed.
+3. *Smaller steps, faster revert.* A step down gives up a quarter of a worker or request count
+   (at least 1) instead of half. Up still doubles: with +25% steps the climb stalled below the
+   optimum in the simulator (HDD chunk stopped at 2.5 MiB of 4; an NVMe run from the minimum
+   stopped at 7 workers), because each small step gains under the 5% threshold. A trial that runs
+   10% below its base after 3 ticks is reverted then, not after the 9 of a window.
+4. *No ties outside the background.* A step is kept only for a gain over 5%. The background keeps
+   its rule (a step down under 2% cost is kept). `Tuner::best` therefore moves only on a real
+   gain, and a flat run remembers its start.
+
+**Simulator, not hardware.** Time with the tuner divided by time on the fixed profile of the
+class, 10 seeds, median / worst; operations that take 2, 30 and 120 s on the fixed profile. The
+fixed profile is the one `fixed_start` gives: whole pool, queue 32, 128 KiB for nvme, sata_ssd,
+net and slow_cpu; three quarters of the pool, queue 4, 1 MiB for hdd, sd and usb2.
+
+| machine | 2 s | 30 s | 120 s |
+| --- | --- | --- | --- |
+| nvme | 1.000 / 1.000 | 1.003 / 1.003 | 1.002 / 1.002 |
+| sata_ssd | 1.000 / 1.000 | 1.000 / 1.000 | 1.000 / 1.000 |
+| net | 1.000 / 1.000 | 1.000 / 1.000 | 1.000 / 1.000 |
+| slow_cpu | 1.000 / 1.000 | 1.003 / 1.003 | 1.002 / 1.003 |
+| hdd | 1.000 / 1.000 | 0.373 / 0.375 | 0.227 / 0.228 |
+| usb2 | 1.000 / 1.000 | 0.625 / 0.627 | 0.570 / 0.570 |
+| sd | 1.000 / 1.000 | 0.837 / 0.837 | 0.810 / 0.811 |
+
+The simulator tests (`the_tuner_is_never_five_percent_slower_than_the_fixed_profile`, and
+`the_tuner_keeps_its_gain_where_the_fixed_profile_is_wrong` for at most 0.8 on hdd and usb2) keep
+this from regressing. The simulator's fixed SSD profile is already the best setting, so its 1.000
+says only that the tuner does not make a good start worse; it says nothing about real drives.
+
+**Real hardware (to measure; the acceptance of this change).** Never more than 5% slower than the
+fixed profile on SSD or HDD, and the HDD gains kept. Same runs as the measurements above, release
+build, with and without `--tune`, the old `volumes.tsv` irrelevant (new keys):
+
+| case | no tuner | tuner before | tuner after |
+| --- | --- | --- | --- |
+| NVMe, 1 GiB, one file | 21.6 s | 24.4 to 25.6 s | to measure |
+| NVMe, gentle, user active | 35.7 s | 43.0 s | to measure |
+| HDD, 1 GiB, one file | 119 s | 65 s | to measure |
+| HDD, gentle, 20,000 x 16 KiB, user active | 464 s | 189 s | to measure |
+| HDD, normal, 20,000 small files, warm cache | 15 to 16 s | 22 to 24 s | to measure |
+
+**Risks.**
+
+- The HDD gains were measured with a tuner that kept ties. If some of them came from steps worth
+  under 5% each, they shrink now. The HDD rows above are the check; if one falls short, the
+  threshold for a step down on a drive that thrashes is the first thing to look at.
+- `EXPLORE_AFTER_TICKS` (3 s) is a first guess. A longer delay protects short operations more and
+  delays the HDD gain by the same amount; the real runs decide.
+- The start queue depth differs from the fixed profile's (none). Its only consumer today is the
+  cache-hygiene writeback, which is off by default.
+- The normal profile still has the tuner off by default (update 2026-11-12, decision 1); this
+  change does not touch that, and the small-file loss on the HDD is not explained by it.

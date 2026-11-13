@@ -17,6 +17,10 @@ const MIN_CHUNK: usize = 64 << 10;
 const MAX_CHUNK: usize = 4 << 20;
 /// With less RAM than this the biggest request stays at 1 MiB.
 const SMALL_RAM: u64 = 1 << 30;
+/// Prefix of every volume key. Raise it when what is remembered stops meaning the same: entries
+/// under another prefix are never found, and age out of the file. Version 2: the tuner of
+/// version 1 kept ties and so could save the floor of every knob after a run on small files.
+const KEY_VERSION: &str = "v2";
 
 /// Ceilings from the profile settings, the drive and the memory budget.
 pub fn bounds(opts: &Options, ram_total: Option<u64>) -> TuneBounds {
@@ -30,6 +34,18 @@ pub fn bounds(opts: &Options, ram_total: Option<u64>) -> TuneBounds {
         max_io_depth: if opts.drive == DriveKind::Ssd { 32 } else { 4 },
         min_chunk: MIN_CHUNK,
         max_chunk,
+    }
+}
+
+/// What the untuned run would use on this drive class and profile, so the tuner starts where
+/// the fixed profile is and not at its minimum. Workers and request size are the profile's;
+/// the fixed profile has no queue limit, so the deepest queue the drive class allows stands
+/// for it.
+fn fixed_start(opts: &Options, bounds: TuneBounds) -> Knobs {
+    Knobs {
+        workers: bounds.max_workers,
+        io_depth: bounds.max_io_depth,
+        chunk: opts.settings().buffer,
     }
 }
 
@@ -58,8 +74,7 @@ pub fn volume_key<'a>(paths: impl IntoIterator<Item = &'a Path>) -> String {
         .collect();
     parts.sort();
     parts.dedup();
-    parts
-        .join("+")
+    format!("{KEY_VERSION}:{}", parts.join("+"))
         .chars()
         .map(|c| if c.is_control() { '_' } else { c })
         .collect()
@@ -149,10 +164,11 @@ pub fn begin<'a>(opts: &Options, paths: impl IntoIterator<Item = &'a Path>) -> O
         .as_deref()
         .and_then(|f| load(f).into_iter().find(|(k, _)| *k == key))
         .map(|(_, v)| v);
-    let tuner = match remembered {
-        Some(start) => Tuner::with_start(mode, bounds, start),
-        None => Tuner::new(mode, bounds, None),
-    };
+    let tuner = Tuner::with_start(
+        mode,
+        bounds,
+        remembered.unwrap_or_else(|| fixed_start(opts, bounds)),
+    );
     let signals = Box::new(|| zstar_core::Signals {
         pressure: zstar_sys::memory_pressure(),
         user_input: false,
@@ -240,6 +256,36 @@ mod tests {
         assert_eq!(bounds(&opts, Some(512 << 20)).max_chunk, 1 << 20);
         assert_eq!(mode(Profile::Gentle), Mode::BackgroundActive);
         assert_eq!(mode(Profile::Auto), Mode::Foreground);
+    }
+
+    #[test]
+    fn the_tuner_starts_from_the_fixed_profile_of_the_drive_class() {
+        for (drive, buffer, depth) in [
+            (DriveKind::Ssd, 128 << 10, 32),
+            (DriveKind::Hdd, 1 << 20, 4),
+            (DriveKind::Unknown, 1 << 20, 4),
+        ] {
+            let opts = Options {
+                drive,
+                ..Options::default()
+            };
+            let b = bounds(&opts, Some(16 << 30));
+            let start = fixed_start(&opts, b);
+            assert_eq!(start.chunk, buffer, "{drive:?}");
+            assert_eq!(start.io_depth, depth, "{drive:?}");
+            assert_eq!(start.workers, opts.effective_threads(), "{drive:?}");
+            // Never the floor of any knob, which is where the old tuner could be left.
+            assert!(start.chunk > MIN_CHUNK && start.io_depth > 1, "{drive:?}");
+        }
+    }
+
+    #[test]
+    fn keys_carry_the_memory_version() {
+        let key = volume_key([Path::new(".")]);
+        assert!(key.starts_with(&format!("{KEY_VERSION}:")), "{key}");
+        // An entry written before the version existed is never found under a current key.
+        let old = [("ssd:nvme:nvme0n1".to_owned(), k(1, 1, MIN_CHUNK))];
+        assert!(old.iter().all(|(entry, _)| *entry != key));
     }
 
     #[test]

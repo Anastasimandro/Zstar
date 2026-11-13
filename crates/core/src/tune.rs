@@ -17,9 +17,15 @@
 //!   `BackgroundActive` on the first user input.
 //!
 //! **Throughput.** One knob at a time. A change is kept when the median throughput of the
-//! next window beats the previous one by more than `GAIN`; a step down is kept when it costs
-//! less than `HOLD_TOL`, because the same speed with less pressure is better. A fresh start
-//! doubles each knob while it pays (slow start); later probes move one step.
+//! next window beats the previous one by more than `GAIN`. Only a background operation also
+//! keeps a step down that costs less than `HOLD_TOL`, because there the same speed with less
+//! pressure is better; when somebody waits for the result a tie is not worth keeping, and
+//! keeping ties walks every knob down to its floor whenever throughput does not depend on
+//! them (many small files). The first exploration doubles a knob while it pays and steps a
+//! worker or request count down by `DOWN_STEP`; later probes move one step. Nothing is tried
+//! before `EXPLORE_AFTER_TICKS` ticks of work, so a short operation runs entirely on the
+//! values it started with, and a trial that runs `ABORT_LOSS` below its base is reverted
+//! after `ABORT_MIN_TICKS` ticks, not a whole window.
 //!
 //! **Interference**, noticed without OS calls: at a low priority, competition shows up in the
 //! operation's own numbers. Average I/O latency above `LAT_LIMIT` times the best seen with
@@ -74,6 +80,17 @@ const FALLBACK_TICKS: u32 = 20;
 const DEFAULT_CHUNK: usize = 1 << 20;
 /// Smallest request size the tuner accepts as a bound.
 const MIN_CHUNK_FLOOR: usize = 4096;
+/// Ticks of work (about 3 s) before the first trial. An operation shorter than this keeps
+/// the values it started with, so it cannot be slower than them. The one threshold for
+/// "short".
+const EXPLORE_AFTER_TICKS: u64 = 30;
+/// Share of a worker or request count given up by one step down while exploring (at least 1).
+/// Request size still halves: its effect on throughput is mild, so a wrong step costs little.
+const DOWN_STEP: f64 = 0.25;
+/// Throughput under the base, as a fraction of it, that makes a trial lose at once.
+const ABORT_LOSS: f64 = 0.10;
+/// Ticks of a trial needed before it may be abandoned, so one noisy tick cannot do it.
+const ABORT_MIN_TICKS: usize = 3;
 
 /// Every knob, in the order a fresh start explores them.
 const ALL_KNOBS: [Knob; 3] = [Knob::IoDepth, Knob::Workers, Knob::Chunk];
@@ -288,6 +305,8 @@ pub struct Tuner {
     bounds: TuneBounds,
     knobs: Knobs,
     tick: u64,
+    /// Ticks that carried work, idle ones not counted; see `EXPLORE_AFTER_TICKS`.
+    active: u64,
     since_change: u32,
     window: Vec<f64>,
     /// Throughput of the current knobs, once measured.
@@ -319,14 +338,15 @@ impl Tuner {
     /// A tuner for a new operation. `remembered` is what [`Tuner::best`] returned last time on
     /// the same volume; without it the tuner starts from safe values and explores.
     ///
-    /// Operations shorter than about a second finish before the tuner learns anything; for
-    /// those, use `remembered` or the defaults and skip the tuner.
+    /// Nothing is tried during the first `EXPLORE_AFTER_TICKS` ticks of work, so a short
+    /// operation runs on these values unchanged.
     pub fn new(mode: Mode, bounds: TuneBounds, remembered: Option<Knobs>) -> Self {
         Self::build(mode, bounds, remembered, remembered.is_none())
     }
 
-    /// Like [`Tuner::new`] without memory, but starting from `start` (for example a hint from
-    /// the drive kind) and still exploring from there.
+    /// Like [`Tuner::new`] without memory, but starting from `start` (for example the fixed
+    /// profile of the drive kind) and still exploring from there once the operation has run
+    /// long enough for that to pay.
     pub fn with_start(mode: Mode, bounds: TuneBounds, start: Knobs) -> Self {
         Self::build(mode, bounds, Some(start), true)
     }
@@ -342,6 +362,7 @@ impl Tuner {
                 chunk: bounds.min_chunk,
             },
             tick: 0,
+            active: 0,
             since_change: 0,
             window: Vec::with_capacity(MEASURE_TICKS),
             reference: None,
@@ -457,6 +478,7 @@ impl Tuner {
             // Idle, for example between files: nothing to learn.
             return self.hold();
         }
+        self.active = self.active.saturating_add(1);
         self.since_change = self.since_change.saturating_add(1);
         if self.since_change <= SETTLE_TICKS {
             return self.hold();
@@ -479,12 +501,32 @@ impl Tuner {
         self.cooldown = self.cooldown.saturating_sub(1);
         self.window.push(sample.bytes as f64 / secs);
         if self.window.len() < MEASURE_TICKS {
-            return self.hold();
+            let Some(rate) = self.losing_trial() else {
+                return self.hold();
+            };
+            self.window.clear();
+            let reason = self.on_epoch(rate);
+            return self.decide(old, reason);
         }
         let rate = median(&mut self.window);
         self.window.clear();
         let reason = self.on_epoch(rate);
         self.decide(old, reason)
+    }
+
+    /// The median so far of a trial that already runs well under its base. Time spent at a
+    /// setting that loses is the whole cost of trying it, so it is reverted without waiting
+    /// for the full window.
+    fn losing_trial(&self) -> Option<f64> {
+        let trial = self.trial?;
+        let n = self.window.len();
+        if n < ABORT_MIN_TICKS {
+            return None;
+        }
+        let mut seen = [0.0; MEASURE_TICKS];
+        seen[..n].copy_from_slice(&self.window);
+        let rate = median(&mut seen[..n]);
+        (rate < trial.base * (1.0 - ABORT_LOSS)).then_some(rate)
     }
 
     fn worker_cap(&self) -> usize {
@@ -657,7 +699,7 @@ impl Tuner {
     }
 
     fn finish_trial(&mut self, trial: Trial, rate: f64) -> Reason {
-        let kept = if trial.up {
+        let kept = if trial.up || self.mode != Mode::BackgroundActive {
             rate > trial.base * (1.0 + GAIN)
         } else {
             rate >= trial.base * (1.0 - HOLD_TOL)
@@ -695,7 +737,7 @@ impl Tuner {
     }
 
     fn next_trial(&mut self, base: f64) -> Option<Reason> {
-        if self.cooldown > 0 {
+        if self.cooldown > 0 || self.active < EXPLORE_AFTER_TICKS {
             return None;
         }
         loop {
@@ -801,11 +843,14 @@ fn explore(knobs: &[Knob]) -> VecDeque<Explore> {
         .collect()
 }
 
-fn step_count(value: usize, up: bool, double: bool) -> usize {
-    match (up, double) {
+/// One step of a count. While exploring, up doubles (a climb that gains little per step stalls
+/// under `GAIN` before the optimum) and down gives up `DOWN_STEP` of it (halving workers can
+/// halve a CPU-bound rate). A later probe moves one unit.
+fn step_count(value: usize, up: bool, exploring: bool) -> usize {
+    match (up, exploring) {
         (true, true) => value.saturating_mul(2),
         (true, false) => value.saturating_add(1),
-        (false, true) => value / 2,
+        (false, true) => value.saturating_sub(((value as f64 * DOWN_STEP).ceil() as usize).max(1)),
         (false, false) => value.saturating_sub(1),
     }
 }
@@ -1422,6 +1467,231 @@ mod tests {
         let d = tuner.set_bounds(low);
         assert!(d.changed);
         assert_eq!((d.knobs.workers, d.knobs.io_depth), (2, 1));
+    }
+
+    /// Throughput that does not depend on the knobs at all: many small files, or a bottleneck
+    /// elsewhere. Nothing a probe tries can gain, and nothing it tries costs anything.
+    fn flat_run(mode: Mode, start: Knobs, ticks: usize) -> Tuner {
+        let mut tuner = Tuner::with_start(mode, bounds(), start);
+        let mut rng = Rng(3);
+        for _ in 0..ticks {
+            let bytes = (100.0 * MIB * DT * rng.noise()) as u64;
+            let s = Sample {
+                elapsed: Duration::from_secs_f64(DT),
+                bytes,
+                io_ops: 100,
+                io_wait: Duration::from_millis(5),
+                busy: Duration::from_millis(50),
+                ..Sample::default()
+            };
+            tuner.step(&s);
+        }
+        tuner
+    }
+
+    #[test]
+    fn flat_throughput_leaves_the_knobs_where_they_started_outside_the_background() {
+        let start = Knobs {
+            workers: 4,
+            io_depth: 32,
+            chunk: 256 << 10,
+        };
+        for mode in [Mode::Foreground, Mode::BackgroundAway] {
+            let tuner = flat_run(mode, start, 1200);
+            assert_eq!(tuner.knobs(), start, "{mode:?}");
+            // What the cli remembers for the next run must not be a floor reached by drift.
+            assert_eq!(tuner.best(), Some(start), "{mode:?}");
+        }
+    }
+
+    /// Every change the tuner makes on a machine given as a function of the knobs: (tick,
+    /// knobs after it).
+    fn changes(mut tuner: Tuner, ticks: usize, rate: impl Fn(Knobs) -> f64) -> Vec<(usize, Knobs)> {
+        let mut out = Vec::new();
+        for tick in 0..ticks {
+            let s = Sample {
+                elapsed: Duration::from_secs_f64(DT),
+                bytes: (rate(tuner.knobs()) * DT) as u64,
+                io_ops: 100,
+                io_wait: Duration::from_millis(5),
+                busy: Duration::from_millis(50),
+                ..Sample::default()
+            };
+            let d = tuner.step(&s);
+            if d.changed {
+                out.push((tick, d.knobs));
+            }
+        }
+        out
+    }
+
+    /// A machine where the start values are the best there are and everything else is half as
+    /// fast, so every trial loses.
+    fn start_is_best(start: Knobs) -> impl Fn(Knobs) -> f64 {
+        move |k| if k == start { 100.0 * MIB } else { 50.0 * MIB }
+    }
+
+    #[test]
+    fn a_short_operation_runs_on_its_start_values() {
+        for (name, m) in machines() {
+            let start = Knobs {
+                workers: 3,
+                io_depth: 4,
+                chunk: 1 << 20,
+            };
+            let mut tuner = Tuner::with_start(Mode::Foreground, bounds(), start);
+            let mut rng = Rng(5);
+            let mut first_change = None;
+            for tick in 0..300 {
+                let (s, _, _) = sample(&m, tuner.knobs(), 0, 0, &mut rng, false);
+                if tuner.step(&s).changed && first_change.is_none() {
+                    first_change = Some(tick);
+                }
+            }
+            // Two seconds, written out: the test must not follow the constant it checks.
+            let first = first_change.unwrap_or(usize::MAX);
+            assert!(first >= 20, "{name}: changed at tick {first}");
+        }
+        // The gate delays exploration; it does not turn it off.
+        let m = named("hdd");
+        let start = Knobs {
+            workers: 6,
+            io_depth: 4,
+            chunk: 1 << 20,
+        };
+        let moved = changes(
+            Tuner::with_start(Mode::Foreground, bounds(), start),
+            300,
+            |k| rate_of(&m, k, 0, 0).0,
+        );
+        assert!(!moved.is_empty());
+    }
+
+    #[test]
+    fn a_trial_that_loses_badly_is_reverted_within_a_few_ticks() {
+        let start = Knobs {
+            workers: 4,
+            io_depth: 4,
+            chunk: 1 << 20,
+        };
+        let moved = changes(
+            Tuner::with_start(Mode::Foreground, bounds(), start),
+            400,
+            start_is_best(start),
+        );
+        let mut trials = 0;
+        for pair in moved.windows(2) {
+            // A trial is running whenever the knobs after a change are not the start.
+            if pair[0].1 != start {
+                trials += 1;
+                let ticks = pair[1].0 - pair[0].0;
+                assert!(
+                    ticks <= SETTLE_TICKS as usize + ABORT_MIN_TICKS,
+                    "trial of {:?} ran {ticks} ticks",
+                    pair[0].1
+                );
+            }
+        }
+        assert!(trials >= 3, "{moved:?}");
+        // Whatever it tried, it ends on the start values.
+        assert_eq!(moved.last().map(|c| c.1), Some(start));
+    }
+
+    #[test]
+    fn exploring_steps_down_by_a_quarter_not_a_half() {
+        let start = Knobs {
+            workers: 8,
+            io_depth: 8,
+            chunk: 1 << 20,
+        };
+        let moved = changes(
+            Tuner::with_start(Mode::Foreground, bounds(), start),
+            600,
+            start_is_best(start),
+        );
+        let lowest_workers = moved.iter().map(|c| c.1.workers).min().unwrap();
+        let lowest_depth = moved.iter().map(|c| c.1.io_depth).min().unwrap();
+        // 8 less a quarter is 6; a step that halved would have tried 4.
+        assert_eq!((lowest_workers, lowest_depth), (6, 6), "{moved:?}");
+    }
+
+    /// The drive class a simulated machine stands for, and the knobs the fixed profile gives
+    /// it: solid-state and network drives the whole pool, a deep queue and small requests; the
+    /// others three quarters of the pool, a short queue and big requests (see
+    /// `profile::settings_for` and the cli's `tuning::fixed_start`).
+    fn fixed_start(name: &str, m: &Machine) -> Knobs {
+        match name {
+            "nvme" | "sata_ssd" | "net" | "slow_cpu" => Knobs {
+                workers: m.cores,
+                io_depth: 32,
+                chunk: 128 << 10,
+            },
+            _ => Knobs {
+                workers: (m.cores - m.cores / 4).max(1),
+                io_depth: 4,
+                chunk: 1 << 20,
+            },
+        }
+    }
+
+    /// Seconds to move `bytes`, with the tuner when `tuned`, else on the fixed values.
+    fn seconds_for(m: &Machine, fixed: Knobs, bytes: f64, tuned: bool, seed: u64) -> f64 {
+        let mut tuner = Tuner::with_start(Mode::Foreground, bounds(), fixed);
+        let mut rng = Rng(seed);
+        let mut done = 0.0;
+        let mut ticks = 0.0;
+        while done < bytes {
+            let knobs = if tuned { tuner.knobs() } else { fixed };
+            let (s, rate, _) = sample(m, knobs, 0, 0, &mut rng, false);
+            if tuned {
+                tuner.step(&s);
+            }
+            done += rate * DT;
+            ticks += 1.0;
+        }
+        ticks * DT
+    }
+
+    #[test]
+    fn the_tuner_is_never_five_percent_slower_than_the_fixed_profile() {
+        let mut worst: f64 = 0.0;
+        for (name, m) in machines() {
+            let fixed = fixed_start(name, &m);
+            let rate = rate_of(&m, fixed, 0, 0).0;
+            for seed in 1..=10 {
+                // An operation that takes 2 s on the fixed values is never touched; one that
+                // takes 30 s may explore and must not lose.
+                for (secs, limit) in [(2.0, 1.0001), (30.0, 1.05)] {
+                    let bytes = rate * secs;
+                    let fixed_s = seconds_for(&m, fixed, bytes, false, seed);
+                    let tuned_s = seconds_for(&m, fixed, bytes, true, seed);
+                    worst = worst.max(tuned_s / fixed_s);
+                    assert!(
+                        tuned_s <= fixed_s * limit,
+                        "{name} seed {seed} {secs} s: {tuned_s:.1} s tuned, {fixed_s:.1} s fixed"
+                    );
+                }
+            }
+        }
+        assert!(worst > 0.0);
+    }
+
+    #[test]
+    fn the_tuner_keeps_its_gain_where_the_fixed_profile_is_wrong() {
+        // A spinning-disk class machine on which the fixed queue of 4 thrashes the drive.
+        for name in ["hdd", "usb2"] {
+            let m = named(name);
+            let fixed = fixed_start(name, &m);
+            let bytes = rate_of(&m, fixed, 0, 0).0 * 30.0;
+            for seed in 1..=10 {
+                let fixed_s = seconds_for(&m, fixed, bytes, false, seed);
+                let tuned_s = seconds_for(&m, fixed, bytes, true, seed);
+                assert!(
+                    tuned_s <= fixed_s * 0.8,
+                    "{name} seed {seed}: {tuned_s:.1} s tuned, {fixed_s:.1} s fixed"
+                );
+            }
+        }
     }
 
     #[test]

@@ -1,0 +1,84 @@
+name: Fuzz (long run)
+
+# Weekly and on demand: 20 minutes per target by default, the corpus kept between runs.
+# Pull requests get the 60-second run in ci.yml. See docs/adr/0013-fuzzing.md.
+on:
+  schedule:
+    - cron: "23 3 * * 0"
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Seconds to fuzz each target
+        required: true
+        default: "1200"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: ""
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [detect, zip_list_extract, tar_list_extract, sevenz_list_extract, single_stream, path_sanitize]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: nightly
+          components: rust-src
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: fuzz
+          shared-key: fuzz
+          cache-bin: true
+      - name: Install cargo-fuzz
+        shell: bash
+        env:
+          CARGO_FUZZ_VERSION: "0.13.2"
+        run: |
+          if command -v cargo-fuzz >/dev/null && cargo fuzz --version | grep -qF "cargo-fuzz $CARGO_FUZZ_VERSION"; then
+            echo "cargo-fuzz $CARGO_FUZZ_VERSION is cached"
+            exit 0
+          fi
+          for attempt in 1 2 3; do
+            if cargo install cargo-fuzz --version "$CARGO_FUZZ_VERSION" --locked --force; then
+              exit 0
+            fi
+            echo "::warning::cargo-fuzz install failed (attempt $attempt of 3)"
+            sleep $((attempt * 15))
+          done
+          echo "::error::cargo-fuzz could not be installed"
+          exit 1
+      # A fresh key every run, so the corpus that grew is saved; the newest one is restored.
+      - name: Restore the corpus
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+      - name: Fuzz ${{ matrix.target }}
+        run: fuzz/run.sh ${{ matrix.target }} ${{ inputs.seconds || '1200' }}
+      # Drop inputs that add no coverage, so the cached corpus stays small.
+      - name: Minimise the corpus
+        run: cd fuzz && cargo fuzz cmin ${{ matrix.target }} corpus/${{ matrix.target }}
+      - name: Save the corpus
+        if: always()
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+      - name: Keep the crashing inputs
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fuzz-crash-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          if-no-files-found: ignore
+          retention-days: 90

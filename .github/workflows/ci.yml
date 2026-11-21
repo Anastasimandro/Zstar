@@ -22,6 +22,8 @@ jobs:
           toolchain: stable
           components: rustfmt
       - run: cargo fmt --all --check
+      # The fuzz crate has its own workspace, so `--all` above does not reach it.
+      - run: cargo fmt --manifest-path fuzz/Cargo.toml --check
 
   clippy:
     runs-on: ubuntu-latest
@@ -33,6 +35,9 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # The fuzz crate has its own workspace; its harness checks run on stable.
+      - run: cargo clippy --manifest-path fuzz/Cargo.toml --all-targets --locked -- -D warnings
+      - run: cargo test --manifest-path fuzz/Cargo.toml --lib --locked
       - name: Each format feature builds on its own
         run: |
           for f in zip tar gzip zstd bzip2 xz lz4 brotli sevenz zip-bzip2 zip-lzma zip-zstd zip-deflate64 zip-aes sevenz-aes tar,gzip tar,zstd tar,bzip2 tar,xz tar,lz4; do
@@ -98,3 +103,54 @@ jobs:
           exit 1
       - name: Check dependencies
         run: cargo deny --locked check
+
+  # Pull requests only: 60 s per target, any crash, hang (10 s) or memory overrun (512 MiB)
+  # fails the job. The long run is fuzz.yml. See docs/adr/0013-fuzzing.md.
+  fuzz:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [detect, zip_list_extract, tar_list_extract, sevenz_list_extract, single_stream, path_sanitize]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # libFuzzer needs the sanitizer flags of nightly; rust-src is for cargo-fuzz's -Zbuild-std.
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: nightly
+          components: rust-src
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: fuzz
+          shared-key: fuzz
+          cache-bin: true
+      - name: Install cargo-fuzz
+        shell: bash
+        env:
+          CARGO_FUZZ_VERSION: "0.13.2"
+        run: |
+          if command -v cargo-fuzz >/dev/null && cargo fuzz --version | grep -qF "cargo-fuzz $CARGO_FUZZ_VERSION"; then
+            echo "cargo-fuzz $CARGO_FUZZ_VERSION is cached"
+            exit 0
+          fi
+          for attempt in 1 2 3; do
+            if cargo install cargo-fuzz --version "$CARGO_FUZZ_VERSION" --locked --force; then
+              exit 0
+            fi
+            echo "::warning::cargo-fuzz install failed (attempt $attempt of 3)"
+            sleep $((attempt * 15))
+          done
+          echo "::error::cargo-fuzz could not be installed"
+          exit 1
+      - name: Fuzz ${{ matrix.target }} for 60 s
+        run: fuzz/run.sh ${{ matrix.target }} 60
+      - name: Keep the crashing input
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fuzz-crash-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          if-no-files-found: ignore
+          retention-days: 30

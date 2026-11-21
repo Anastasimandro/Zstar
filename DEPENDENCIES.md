@@ -58,3 +58,15 @@ bzip2-1.0.6 and Unlicense (as one alternative of a dual licence).
 - RAR is extract-only, through libarchive. The `unrar` crate is banned in `deny.toml`.
 - Slint, when the GUI arrives, is used only under its GPL-3.0 option.
 - Adding a dependency means adding it to this file in the same commit.
+
+## Fuzzing (`fuzz/`, never linked into a release)
+
+Own workspace and lock file, Linux and nightly only; see [ADR 0013](docs/adr/0013-fuzzing.md).
+Versions were read from docs.rs and the crates' own manifests on 21 Nov 2026; crates.io itself
+could not be reached from the working environment, so the release dates are not confirmed.
+
+| Crate | Version | Licence | Why |
+|-------|---------|---------|-----|
+| libfuzzer-sys | 0.4.13 | (MIT OR Apache-2.0) AND NCSA | libFuzzer entry point; the bundled LLVM libFuzzer is NCSA. `cargo deny` rejects NCSA until the owner decides where to allow it |
+| cargo-fuzz | 0.13.2 (CI and local installs: `cargo install cargo-fuzz --version 0.13.2 --locked`) | MIT OR Apache-2.0 | Builds and runs the targets; needs nightly and a C++ compiler |
+| arbitrary | 1.5.0 | pulled in by libfuzzer-sys | Transitive; passes `cargo deny` |

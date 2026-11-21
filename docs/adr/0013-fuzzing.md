@@ -1,6 +1,6 @@
 # 0013: Fuzzing of the formats and the path sanitiser
 
-- Status: Accepted (the licence of `libfuzzer-sys` needs the owner's decision, see Consequences)
+- Status: Accepted (NCSA allowed for `fuzz/` only, see Consequences)
 - Date: 2026-11-21
 - Changes: section 9 (quality bar) of [`../DECISIONS.md`](../DECISIONS.md): "fuzzing for every new format" now has a harness; builds on [0007](0007-format-scope.md)
 
@@ -57,10 +57,11 @@ memory; a fuzzer is the cheapest way to test that against input nobody wrote by 
 - A crash found by CI is a bug: fix it in its own commit with the minimised input as a
   regression test.
 - `libfuzzer-sys` is licensed `(MIT OR Apache-2.0) AND NCSA` (its bundled LLVM libFuzzer is
-  under NCSA, a permissive BSD-style licence). `cargo deny` rejects it because NCSA is not in
-  `deny.toml`. The crate is never linked into a release, but whether to allow NCSA, and where
-  (only for `fuzz/`, or in the root file), is the owner's call. Until then the deny job checks
-  the root workspace only and does not cover `fuzz/`.
+  under NCSA, an OSI-approved BSD-style licence). Owner's decision: NCSA is allowed in
+  `fuzz/deny.toml` only and is not in the root `deny.toml`, because the harness is a dev tool
+  that is never built, linked or packaged into a release binary.
+- The `deny` job in `ci.yml` checks both workspaces: the root with `deny.toml`, `fuzz/` with
+  `fuzz/deny.toml`. The two files are identical except for the NCSA line; keep them in step.
 - Each pull request spends about six short jobs; the weekly run about two hours of runner time.
 - Extraction writes real files, so throughput is about a thousand inputs per second for zip
   and 7z, and tens of thousands for the sanitiser. See [`../reports/fuzzing.md`](../reports/fuzzing.md).

@@ -1,0 +1,36 @@
+# Same rules as the root deny.toml, plus NCSA. Keep the two files in step; NCSA is the only
+# difference. See docs/adr/0013-fuzzing.md.
+# Zstar is GPL-3.0-only: every dependency must be under a licence that can be combined with it.
+[licenses]
+confidence-threshold = 0.9
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
+    "Zlib",
+    "Unicode-3.0",
+    "Unlicense",
+    # libbz2-rs-sys (pure-Rust bzip2). Permissive BSD-style licence of the original bzip2:
+    # keep the notice, do not misrepresent the origin, no endorsement. No copyleft.
+    "bzip2-1.0.6",
+    # libfuzzer-sys: "(MIT OR Apache-2.0) AND NCSA", the NCSA part being the bundled LLVM
+    # libFuzzer. OSI-approved BSD-style licence: keep the notice, no endorsement. Allowed here
+    # only, because the fuzz harness is a dev tool that is never linked into a release.
+    "NCSA",
+    "GPL-3.0-only", # the workspace crates themselves
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# RAR is extract-only, through libarchive. Never use the unrar crate.
+deny = [{ crate = "unrar" }, { crate = "unrar_sys" }]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+
+[advisories]
+unmaintained = "workspace"

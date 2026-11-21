@@ -38,5 +38,5 @@ None found in 5 min per target: no crash, hang over 10 s, memory over 512 MiB or
 - The CI jobs have not run yet: the 60 s job only runs on pull requests, and work went straight to main. Run the "Fuzz (long run)" workflow by hand once to check it, with a small `seconds` value.
 - CI times are therefore estimates: about 3 min per target in the pull request job (cached build about 1 min, 60 s of fuzzing, install and checkout), the six in parallel; weekly run about 25 min wall clock per target in parallel, 2.5 hours of runner time.
 - crates.io could not be reached from the working environment, so versions and licences were read from docs.rs and the crates' manifests; release dates are unconfirmed.
-- `cargo deny` rejects `libfuzzer-sys` because its licence includes NCSA, which `deny.toml` does not allow. I did not change `deny.toml`; the CI deny job covers the root workspace only. Decision for the owner.
+- `libfuzzer-sys` includes NCSA. Decided by the owner: allowed in `fuzz/deny.toml` only (not in the root `deny.toml`), and the CI deny job now checks both workspaces.
 - Seeds total about 35 KB of binary archives, 70 KB as committed hex: more than "a few KB", because the hostile seeds and the 4 KB tar blocks add up.

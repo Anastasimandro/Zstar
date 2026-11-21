@@ -67,6 +67,6 @@ could not be reached from the working environment, so the release dates are not 
 
 | Crate | Version | Licence | Why |
 |-------|---------|---------|-----|
-| libfuzzer-sys | 0.4.13 | (MIT OR Apache-2.0) AND NCSA | libFuzzer entry point; the bundled LLVM libFuzzer is NCSA. `cargo deny` rejects NCSA until the owner decides where to allow it |
+| libfuzzer-sys | 0.4.13 | (MIT OR Apache-2.0) AND NCSA | libFuzzer entry point; the bundled LLVM libFuzzer is NCSA (OSI-approved, BSD-style). NCSA is allowed in `fuzz/deny.toml` only, not in the root `deny.toml`: dev tool, never shipped in release binaries |
 | cargo-fuzz | 0.13.2 (CI and local installs: `cargo install cargo-fuzz --version 0.13.2 --locked`) | MIT OR Apache-2.0 | Builds and runs the targets; needs nightly and a C++ compiler |
 | arbitrary | 1.5.0 | pulled in by libfuzzer-sys | Transitive; passes `cargo deny` |

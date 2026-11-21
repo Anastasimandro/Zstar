@@ -103,6 +103,11 @@ jobs:
           exit 1
       - name: Check dependencies
         run: cargo deny --locked check
+      # The fuzz workspace has its own lock file and its own config (it also allows NCSA, for
+      # libfuzzer-sys). `!cancelled()` so a failure above does not hide this result.
+      - name: Check fuzz dependencies
+        if: ${{ !cancelled() }}
+        run: cargo deny --locked --manifest-path fuzz/Cargo.toml --config fuzz/deny.toml check
 
   # Pull requests only: 60 s per target, any crash, hang (10 s) or memory overrun (512 MiB)
   # fails the job. The long run is fuzz.yml. See docs/adr/0013-fuzzing.md.

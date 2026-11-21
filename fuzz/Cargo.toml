@@ -1,0 +1,63 @@
+[package]
+name = "zstar-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "GPL-3.0-only"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "=0.4.13"
+tempfile = "=3.27.0"
+zstar-core = { path = "../crates/core", version = "0.1.0" }
+
+# Its own workspace: `cargo build --workspace` at the root never sees this crate, and the
+# nightly-only, Linux-only fuzz build never touches the root lock file.
+[workspace]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "detect"
+path = "fuzz_targets/detect.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "zip_list_extract"
+path = "fuzz_targets/zip_list_extract.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tar_list_extract"
+path = "fuzz_targets/tar_list_extract.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sevenz_list_extract"
+path = "fuzz_targets/sevenz_list_extract.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "single_stream"
+path = "fuzz_targets/single_stream.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "path_sanitize"
+path = "fuzz_targets/path_sanitize.rs"
+test = false
+doc = false
+bench = false

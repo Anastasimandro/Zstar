@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
 members = ["crates/core", "crates/sys", "crates/cli"]
+# Nightly-only, Linux-only; has its own workspace and lock file (see docs/adr/0013).
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.1.0"

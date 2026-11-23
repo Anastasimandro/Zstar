@@ -1,0 +1,17 @@
+[package]
+name = "zstar-rar-sys"
+description = "Vendored libarchive 3.8.11 (RAR and RAR5 readers only) with hand-written bindings. Read-only; never writes RAR"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+# The crate is GPL-3.0-only; the vendored libarchive sources are BSD-2-Clause, with PPMd in the
+# public domain and BLAKE2 under CC0/OpenSSL/Apache-2.0 (our choice: Apache-2.0). See
+# vendor/libarchive/COPYING and THIRD-PARTY-NOTICES.md.
+license = "GPL-3.0-only AND BSD-2-Clause"
+authors.workspace = true
+# One copy of libarchive per final binary.
+links = "zstar_libarchive"
+build = "build.rs"
+
+[build-dependencies]
+cc.workspace = true

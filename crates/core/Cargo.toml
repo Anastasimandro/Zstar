@@ -25,6 +25,8 @@ lz4 = ["dep:lz4_flex"]
 brotli = ["dep:brotli"]
 sevenz = ["dep:sevenz-rust2"]
 sevenz-aes = ["sevenz", "sevenz-rust2/aes256"]
+# Extract-only RAR and RAR5 through vendored libarchive. Off by default: see docs/reports/rar-provenance.md.
+rar = ["dep:zstar-rar"]
 
 [dependencies]
 flate2 = { workspace = true, optional = true }
@@ -37,6 +39,7 @@ lzma-rust2 = { workspace = true, optional = true }
 lz4_flex = { workspace = true, optional = true }
 brotli = { workspace = true, optional = true }
 sevenz-rust2 = { workspace = true, optional = true }
+zstar-rar = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -108,8 +108,10 @@ fn round_trip_every_format_multi_threaded() {
 
 #[test]
 fn all_container_and_single_formats_are_built_in() {
-    let (single, containers): (Vec<_>, Vec<_>) =
-        Format::ALL.into_iter().partition(|f| f.is_single_file());
+    let (single, containers): (Vec<_>, Vec<_>) = Format::ALL
+        .into_iter()
+        .filter(|f| !f.is_extract_only())
+        .partition(|f| f.is_single_file());
     assert_eq!(all_formats(), containers);
     assert_eq!(single_formats(), single);
 }
@@ -288,4 +290,17 @@ fn streams_work_without_touching_the_file_system_for_the_archive() {
         zstar_core::extract(&mut buf, &dest, &Options::default()).unwrap();
         assert_eq!(fs::read(dest.join("proj/a.txt")).unwrap(), b"in memory");
     }
+}
+
+#[test]
+fn rar_can_never_be_created() {
+    // Holds with and without the `rar` feature: refused before anything touches the disk.
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("a.txt");
+    fs::write(&src, b"x").unwrap();
+    let out = tmp.path().join("out.rar");
+    let r = create_file(Format::Rar, &[src], &out, &Options::default());
+    assert!(matches!(r, Err(Error::UnsupportedFormat(_))), "{r:?}");
+    assert!(!out.exists());
+    assert!(find_part_files(tmp.path()).is_empty());
 }

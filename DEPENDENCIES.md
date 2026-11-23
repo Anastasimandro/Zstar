@@ -26,6 +26,8 @@ index when added. `Cargo.lock` is committed and CI builds with `--locked`.
 | libc | 0.2.191 | MIT OR Apache-2.0 | sys (Linux only) | `setpriority` and the `ioprio_set` syscall. Already in the lock file through `tar`/`filetime` |
 | windows-sys | 0.61.2 | MIT OR Apache-2.0 | sys (Windows only) | Storage IOCTLs and background thread mode, with only the five `Win32_*` features it needs. Already in the lock file through `ctrlc` |
 | tempfile | 3.27.0 | MIT OR Apache-2.0 | tests only | Temporary directories |
+| cc | 1.10.0 | MIT OR Apache-2.0 | rar-sys (build script) | Compiles the vendored libarchive C sources. Already in the lock file through `zstd-sys`. No CMake, no bindgen, no libclang |
+| libarchive | 3.8.11 (vendored, not a crate) | BSD-2-Clause; PPMd7 public domain; BLAKE2 CC0 / OpenSSL / Apache-2.0 | rar-sys (`rar` feature) | RAR and RAR5 **reading only**: 17 hand-listed source files under `crates/rar-sys/vendor/libarchive`, no other format, filter, writer or external library. Notice in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md); origin and what could not be verified in [docs/reports/rar-libarchive-v1.md](docs/reports/rar-libarchive-v1.md). The `rar` feature stays off in release builds until the owner signs off [docs/reports/rar-provenance.md](docs/reports/rar-provenance.md) |
 
 ## Notable transitive dependencies
 
@@ -50,12 +52,13 @@ index when added. `Cargo.lock` is committed and CI builds with `--locked`.
 | windows-sys | MIT OR Apache-2.0 | several | Windows API bindings |
 
 The complete list with licences is what `cargo deny list` prints. Licences encountered so far:
-MIT, Apache-2.0 (with and without the LLVM exception), BSD-3-Clause, Zlib, Unicode-3.0,
+MIT, Apache-2.0 (with and without the LLVM exception), BSD-3-Clause, BSD-2-Clause (libarchive), Zlib, Unicode-3.0,
 bzip2-1.0.6 and Unlicense (as one alternative of a dual licence).
 
 ## Rules
 
-- RAR is extract-only, through libarchive. The `unrar` crate is banned in `deny.toml`.
+- RAR is extract-only, through libarchive. The `unrar` crate is banned in `deny.toml`, and so is the UnRAR source: nothing from it may be vendored or translated.
+- `unsafe` lives only in `zstar-rar-sys` and `zstar-rar`; `zstar-core` keeps `#![forbid(unsafe_code)]`.
 - Slint, when the GUI arrives, is used only under its GPL-3.0 option.
 - Adding a dependency means adding it to this file in the same commit.
 

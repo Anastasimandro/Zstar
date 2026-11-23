@@ -26,7 +26,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [detect, zip_list_extract, tar_list_extract, sevenz_list_extract, single_stream, path_sanitize]
+        target: [detect, zip_list_extract, tar_list_extract, sevenz_list_extract, rar_list_extract, single_stream, path_sanitize]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable

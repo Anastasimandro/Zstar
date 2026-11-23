@@ -774,7 +774,22 @@ dependencies = [
  "tar",
  "tempfile",
  "zip",
+ "zstar-rar",
  "zstd",
+]
+
+[[package]]
+name = "zstar-rar"
+version = "0.1.0"
+dependencies = [
+ "zstar-rar-sys",
+]
+
+[[package]]
+name = "zstar-rar-sys"
+version = "0.1.0"
+dependencies = [
+ "cc",
 ]
 
 [[package]]

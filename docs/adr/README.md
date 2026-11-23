@@ -21,3 +21,4 @@ Each ADR has a status, the context, the decision and its consequences. Keep it s
 | [0011](0011-evidence-bounded-metadata-zip-ab.md) | Better evidence, bounded metadata memory, zip upgrade as an A/B | Accepted (Parts 1 to 3, addendum 8 Nov 2026) |
 | [0012](0012-tuning-by-measurement.md) | Tuning by measurement, in the foreground and in the background | Accepted (step 1) |
 | [0013](0013-fuzzing.md) | Fuzzing of the formats and the path sanitiser | Accepted (licence of `libfuzzer-sys` pending) |
+| [0014](0014-rar-read-only-libarchive.md) | RAR, read only, through vendored libarchive | Accepted for the code; publishing blocked on the provenance sign-off |

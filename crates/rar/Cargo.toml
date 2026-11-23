@@ -1,0 +1,11 @@
+[package]
+name = "zstar-rar"
+description = "Safe, read-only RAR and RAR5 reader over any Read + Seek stream, built on vendored libarchive"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+zstar-rar-sys.workspace = true

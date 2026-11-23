@@ -74,6 +74,11 @@ pub enum Error {
     PasswordRequired,
     /// The password does not decrypt the archive.
     WrongPassword,
+    /// The archive is encrypted and this format has no decryption support, so a password would
+    /// not help (RAR).
+    EncryptedUnsupported(Format),
+    /// The archive is one volume of a set and this build cannot read across volumes (RAR).
+    MultiVolumeUnsupported(Format),
     /// The operation was cancelled through its [`Control`](crate::Control).
     Cancelled,
 }
@@ -121,6 +126,20 @@ impl fmt::Display for Error {
                 write!(f, "the archive is encrypted: a password is required")
             }
             Error::WrongPassword => write!(f, "wrong password"),
+            Error::EncryptedUnsupported(fmt) => {
+                write!(
+                    f,
+                    "encrypted {} not supported",
+                    fmt.name().to_ascii_uppercase()
+                )
+            }
+            Error::MultiVolumeUnsupported(fmt) => {
+                write!(
+                    f,
+                    "multi-volume {} not supported",
+                    fmt.name().to_ascii_uppercase()
+                )
+            }
             Error::Cancelled => write!(f, "cancelled"),
         }
     }

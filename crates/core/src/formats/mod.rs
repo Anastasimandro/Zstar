@@ -7,6 +7,8 @@ use crate::format::ReadSeek;
 pub(crate) mod codec;
 #[cfg(feature = "gzip")]
 pub(crate) mod pargz;
+#[cfg(feature = "rar")]
+pub(crate) mod rar;
 #[cfg(feature = "sevenz")]
 pub(crate) mod sevenz;
 #[cfg(any(

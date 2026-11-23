@@ -725,6 +725,7 @@ dependencies = [
  "sevenz-rust2",
  "tar",
  "zip",
+ "zstar-rar",
  "zstd",
 ]
 
@@ -735,6 +736,20 @@ dependencies = [
  "libfuzzer-sys",
  "tempfile",
  "zstar-core",
+]
+
+[[package]]
+name = "zstar-rar"
+version = "0.1.0"
+dependencies = [
+ "zstar-rar-sys",
+]
+
+[[package]]
+name = "zstar-rar-sys"
+version = "0.1.0"
+dependencies = [
+ "cc",
 ]
 
 [[package]]

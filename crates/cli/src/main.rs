@@ -244,7 +244,11 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Cli>, String
             }
             Long("format") => {
                 let v: String = p.value().map_err(e)?.parse().map_err(e)?;
-                format = Some(Format::from_name(&v).ok_or(format!("unknown format '{v}'"))?);
+                let named = Format::from_name(&v).ok_or(format!("unknown format '{v}'"))?;
+                if named.is_extract_only() {
+                    return Err(format!("{v} can only be extracted, never created"));
+                }
+                format = Some(named);
             }
             Short('o') | Long("output") => output = p.value().map_err(e)?.into(),
             Long("max-size") => {

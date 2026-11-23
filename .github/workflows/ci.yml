@@ -71,6 +71,83 @@ jobs:
         shell: bash
         run: cargo run --locked -q -p zstar-cli -- drive-info .
 
+  # The optional RAR reader is vendored C (libarchive) built by `cc`, so it is the one part of the
+  # workspace that can fail to compile on a platform only. Every platform is built separately and
+  # none blocks the others. macOS is paused for releases (ADR 0004) but is built here on purpose.
+  # No fixtures are needed for the build itself; the fixture table runs in `test` once present.
+  rar-build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-gnu, os: ubuntu-latest, target: "" }
+          - { name: linux-musl, os: ubuntu-latest, target: x86_64-unknown-linux-musl }
+          - { name: windows-msvc, os: windows-latest, target: "" }
+          - { name: macos-arm64, os: macos-latest, target: "" }
+          - { name: android-arm64, os: ubuntu-latest, target: aarch64-linux-android }
+    name: rar-build (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: rar-${{ matrix.name }}
+      - name: musl toolchain
+        if: matrix.name == 'linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
+      - name: Android NDK environment
+        if: matrix.name == 'android-arm64'
+        shell: bash
+        run: |
+          bin="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          {
+            echo "CC_aarch64_linux_android=$bin/aarch64-linux-android24-clang"
+            echo "AR_aarch64_linux_android=$bin/llvm-ar"
+            echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$bin/aarch64-linux-android24-clang"
+          } >> "$GITHUB_ENV"
+      - name: Build zstar-rar
+        shell: bash
+        run: |
+          if [ -n "${{ matrix.target }}" ]; then
+            cargo build --locked -p zstar-rar --target "${{ matrix.target }}"
+          else
+            cargo build --locked -p zstar-rar
+          fi
+      - name: Test the RAR crates and core with `rar` (host builds)
+        if: matrix.target == ''
+        run: |
+          cargo test --locked -p zstar-rar-sys -p zstar-rar
+          cargo test --locked -p zstar-core --features rar
+          cargo build --locked -p zstar-cli --features rar
+      - name: Clippy with `rar`
+        if: matrix.name == 'linux-gnu'
+        run: |
+          cargo clippy -p zstar-core --lib --locked --no-default-features --features rar -- -D warnings
+          cargo clippy --workspace --all-targets --locked --features zstar-core/rar -- -D warnings
+
+  # Release builds must not contain RAR until docs/reports/rar-provenance.md is signed off.
+  rar-release-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: release.yml does not enable the rar feature
+        run: |
+          # Comment lines are ignored, so the explanation in release.yml cannot trip the check.
+          if grep -v -E '^[[:space:]]*#' .github/workflows/release.yml | grep -n -E -- '--all-features|(--features|-F)[ =][^ ]*(rar|all)'; then
+            echo "::error::release.yml enables the rar feature, but the provenance gate is not signed off"
+            exit 1
+          fi
+      - name: rar is not a default feature
+        run: |
+          if grep -E '^default *=' crates/core/Cargo.toml crates/cli/Cargo.toml | grep -q '"rar"'; then
+            echo "::error::rar must not be a default feature"
+            exit 1
+          fi
+
   deny:
     runs-on: ubuntu-latest
     steps:
@@ -118,7 +195,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [detect, zip_list_extract, tar_list_extract, sevenz_list_extract, single_stream, path_sanitize]
+        target: [detect, zip_list_extract, tar_list_extract, sevenz_list_extract, rar_list_extract, single_stream, path_sanitize]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       # libFuzzer needs the sanitizer flags of nightly; rust-src is for cargo-fuzz's -Zbuild-std.

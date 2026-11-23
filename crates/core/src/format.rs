@@ -40,12 +40,14 @@ pub enum Format {
     /// A single file compressed with Brotli. Brotli streams carry no signature, so this one
     /// is recognised by the file name only.
     Br,
+    /// RAR and RAR5. Extract only: Zstar never creates RAR.
+    Rar,
 }
 
 impl Format {
     /// Every format, whether or not this build supports it. The tar variants come before the
     /// single-file ones so that `a.tar.gz` is matched as tar.gz and not as gz.
-    pub const ALL: [Format; 14] = [
+    pub const ALL: [Format; 15] = [
         Format::Zip,
         Format::SevenZ,
         Format::Tar,
@@ -60,6 +62,7 @@ impl Format {
         Format::Xz,
         Format::Lz4,
         Format::Br,
+        Format::Rar,
     ];
 
     /// True for formats that compress one file with no container around it. They accept
@@ -69,6 +72,12 @@ impl Format {
             self,
             Format::Gz | Format::Zst | Format::Bz2 | Format::Xz | Format::Lz4 | Format::Br
         )
+    }
+
+    /// True for formats Zstar can only read. Creating RAR is forbidden for good: its compressor
+    /// is proprietary and its licence does not allow recreating it.
+    pub fn is_extract_only(self) -> bool {
+        matches!(self, Format::Rar)
     }
 
     /// Short human-readable name, also accepted by [`Format::from_name`].
@@ -88,6 +97,7 @@ impl Format {
             Format::Xz => "xz",
             Format::Lz4 => "lz4",
             Format::Br => "br",
+            Format::Rar => "rar",
         }
     }
 
@@ -113,6 +123,7 @@ impl Format {
             Format::Xz => &["xz"],
             Format::Lz4 => &["lz4"],
             Format::Br => &["br"],
+            Format::Rar => &["rar"],
         }
     }
 
@@ -240,6 +251,8 @@ pub fn handler(format: Format) -> Result<&'static dyn ArchiveFormat> {
         Format::Lz4 => Ok(&crate::formats::single::SingleFormat::LZ4),
         #[cfg(feature = "brotli")]
         Format::Br => Ok(&crate::formats::single::SingleFormat::BR),
+        #[cfg(feature = "rar")]
+        Format::Rar => Ok(&crate::formats::rar::RarFormat),
         #[allow(unreachable_patterns)]
         other => Err(Error::FeatureDisabled(other)),
     }
@@ -274,6 +287,9 @@ mod tests {
         assert_eq!(f("a.lz4"), Some(Format::Lz4));
         assert_eq!(f("a.br"), Some(Format::Br));
         assert_eq!(f("a.7z"), Some(Format::SevenZ));
+        assert_eq!(f("a.RAR"), Some(Format::Rar));
+        assert!(Format::Rar.is_extract_only());
+        assert!(Format::ALL.iter().filter(|f| f.is_extract_only()).count() == 1);
     }
 
     #[test]

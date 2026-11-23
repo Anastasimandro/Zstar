@@ -27,6 +27,7 @@ Windows 10/11 (x64, ARM64), Linux (x64, ARM64), macOS (universal; **macOS tempor
 - tar.* archives are opened and created as one archive in a single pass: one list of files, and never an intermediate .tar on disk.
 - Extract only: RAR (through libarchive, NEVER the unrar crate), CAB, cpio, ar, deb.
 - RAR is read-only through libarchive, without passwords in v1. A later optional bridge may call an external UnRAR or 7z executable already installed by the user, on Windows only; it is never bundled or linked.
+- RAR v1 is implemented behind the Cargo feature `rar` (off by default, absent from `release.yml` until the owner signs off `docs/reports/rar-provenance.md`): see ADR 0014.
 - Creating RAR is permanently forbidden (proprietary algorithm; the license forbids recreating it). Never add it, not even as an experiment.
 - Out of scope: ISO, libarchive's extra formats (xar, lha, warc, mtree, rpm) and other exotic formats. See ADR 0007.
 - Each format sits behind a Cargo feature with a common interface. Detection by magic bytes; brotli has none, so .br and .tar.br are detected by extension only. AES-256 only for zip and 7z.

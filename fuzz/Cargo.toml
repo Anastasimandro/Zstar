@@ -11,7 +11,8 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "=0.4.13"
 tempfile = "=3.27.0"
-zstar-core = { path = "../crates/core", version = "0.1.0" }
+# `rar` is off in default builds (provenance gate), but the fuzz harness always has it.
+zstar-core = { path = "../crates/core", version = "0.1.0", features = ["rar"] }
 
 # Its own workspace: `cargo build --workspace` at the root never sees this crate, and the
 # nightly-only, Linux-only fuzz build never touches the root lock file.
@@ -44,6 +45,13 @@ bench = false
 [[bin]]
 name = "sevenz_list_extract"
 path = "fuzz_targets/sevenz_list_extract.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rar_list_extract"
+path = "fuzz_targets/rar_list_extract.rs"
 test = false
 doc = false
 bench = false

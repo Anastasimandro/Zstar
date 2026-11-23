@@ -9,11 +9,12 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use zstar_core::{Format, handler};
 
-/// Formats that hold a directory tree. Single-file formats have their own tests.
+/// Formats that hold a directory tree and can be created. Single-file formats have their own
+/// tests; extract-only formats (RAR) are tested against fixtures.
 pub fn all_formats() -> Vec<Format> {
     Format::ALL
         .into_iter()
-        .filter(|&f| !f.is_single_file() && handler(f).is_ok())
+        .filter(|&f| !f.is_single_file() && !f.is_extract_only() && handler(f).is_ok())
         .collect()
 }
 

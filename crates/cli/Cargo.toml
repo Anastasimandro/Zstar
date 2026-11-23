@@ -11,6 +11,11 @@ authors.workspace = true
 name = "zstar"
 path = "src/main.rs"
 
+[features]
+# Not in the default set, and release.yml does not enable it, until the owner signs off
+# docs/reports/rar-provenance.md.
+rar = ["zstar-core/rar"]
+
 [dependencies]
 zstar-core.workspace = true
 zstar-sys.workspace = true

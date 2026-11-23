@@ -8,6 +8,8 @@ allow = [
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
     "BSD-3-Clause",
+    # libarchive (vendored in zstar-rar-sys, RAR reader only).
+    "BSD-2-Clause",
     "Zlib",
     "Unicode-3.0",
     "Unlicense",

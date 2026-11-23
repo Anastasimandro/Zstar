@@ -9,6 +9,11 @@ use crate::options::Limits;
 
 const ZIP_MAGICS: [&[u8]; 2] = [b"PK\x03\x04", b"PK\x05\x06"];
 const SEVENZ_MAGIC: &[u8] = &[b'7', b'z', 0xbc, 0xaf, 0x27, 0x1c];
+// RAR 1.5-4.x and RAR 5.
+const RAR_MAGICS: [&[u8]; 2] = [
+    &[0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x00],
+    &[0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00],
+];
 const GZIP_MAGIC: &[u8] = &[0x1f, 0x8b];
 const ZSTD_MAGIC: &[u8] = &[0x28, 0xb5, 0x2f, 0xfd];
 const BZIP2_MAGIC: &[u8] = b"BZh"; // followed by the block size digit '1'..='9'
@@ -135,6 +140,12 @@ pub(crate) fn detect_limited(input: &mut dyn ReadSeek, max_memory: u64) -> Resul
         #[cfg(not(feature = "sevenz"))]
         return Err(Error::FeatureDisabled(Format::SevenZ));
     }
+    if RAR_MAGICS.iter().any(|m| head.starts_with(m)) {
+        #[cfg(feature = "rar")]
+        return Ok(Format::Rar);
+        #[cfg(not(feature = "rar"))]
+        return Err(Error::FeatureDisabled(Format::Rar));
+    }
     if let Some((single, tar)) = signature(head) {
         let Some(codec) = codec_for(single) else {
             return Err(Error::FeatureDisabled(single));
@@ -218,6 +229,24 @@ mod tests {
         assert_eq!(detect(&mut zip).unwrap(), Format::Zip);
         let mut seven = Cursor::new(b"7z\xbc\xaf\x27\x1c\0\x04rest".to_vec());
         assert_eq!(detect(&mut seven).unwrap(), Format::SevenZ);
+        let mut rar5 = Cursor::new(b"Rar!\x1a\x07\x01\x00rest".to_vec());
+        let mut rar4 = Cursor::new(b"Rar!\x1a\x07\x00rest".to_vec());
+        #[cfg(feature = "rar")]
+        {
+            assert_eq!(detect(&mut rar5).unwrap(), Format::Rar);
+            assert_eq!(detect(&mut rar4).unwrap(), Format::Rar);
+        }
+        #[cfg(not(feature = "rar"))]
+        {
+            assert!(matches!(
+                detect(&mut rar5),
+                Err(Error::FeatureDisabled(Format::Rar))
+            ));
+            assert!(matches!(
+                detect(&mut rar4),
+                Err(Error::FeatureDisabled(Format::Rar))
+            ));
+        }
         let mut empty_zip = Cursor::new(b"PK\x05\x06\0\0\0\0".to_vec());
         assert_eq!(detect(&mut empty_zip).unwrap(), Format::Zip);
 

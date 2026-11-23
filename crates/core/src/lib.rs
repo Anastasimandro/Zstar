@@ -19,6 +19,7 @@
     not(any(
         feature = "zip",
         feature = "sevenz",
+        feature = "rar",
         feature = "tar",
         feature = "gzip",
         feature = "zstd",
@@ -143,6 +144,13 @@ fn create_file_inner(
     output: &Path,
     opts: &Options,
 ) -> Result<()> {
+    if format.is_extract_only() {
+        // Before anything is touched on disk, not only once the handler is reached.
+        return Err(Error::UnsupportedFormat(format!(
+            "{} can only be extracted, never created",
+            format.name().to_ascii_uppercase()
+        )));
+    }
     if fs::symlink_metadata(output).is_ok() && !opts.overwrite {
         return Err(Error::AlreadyExists(output.into()));
     }

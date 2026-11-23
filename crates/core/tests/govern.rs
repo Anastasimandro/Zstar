@@ -52,6 +52,15 @@ fn limited(stats: &Stats, rate: u64) -> Options {
     }
 }
 
+/// Gz bytes differ between the serial (1 thread) and parallel (2+) paths, so the byte
+/// comparison pins the thread count instead of depending on the machine's CPUs.
+fn parallel() -> Options {
+    Options {
+        threads: 2,
+        ..Options::default()
+    }
+}
+
 fn write_input(dir: &Path, len: usize) -> std::path::PathBuf {
     let input = dir.join("input.txt");
     fs::write(&input, data(len)).unwrap();
@@ -116,13 +125,16 @@ fn changing_the_chunk_size_while_it_runs_changes_no_byte() {
         Format::Gz,
         std::slice::from_ref(&input),
         &plain,
-        &Options::default(),
+        &parallel(),
     )
     .unwrap();
 
     let moved = dir.path().join("moved.gz");
     let stats = Stats::new();
-    let opts = limited(&stats, 8 << 20);
+    let opts = Options {
+        threads: 2,
+        ..limited(&stats, 8 << 20)
+    };
     opts.control.set_chunk_ceiling(256 << 10);
     std::thread::scope(|scope| {
         scope.spawn(|| {

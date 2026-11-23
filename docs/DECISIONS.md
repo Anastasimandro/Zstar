@@ -44,6 +44,7 @@ Windows 10/11 (x64, ARM64), Linux (x64, ARM64), macOS (universal; **macOS tempor
 - Measure-first adaptive I/O (ADR 0010): the engine will regulate itself by measuring throughput and waits; the drive kind (ADR 0009) and the profiles (ADR 0008) stay as starting values and ceilings. Part 1 only measures. Superseded in part by ADR 0012: the tuner in core decides workers, requests in flight and request size from measurement alone, with three modes (foreground, background with the user active, background with nobody at the machine); drive kind and profiles are only starting values and ceilings.
 - core exposes a control handle: progress, cancel, plus live-adjustable threads, CPU/IO priority and throughput limit. Changing compression level mid-operation is a later improvement and only at block or file boundaries.
 - Benchmarks: hyperfine and peak RAM against 7-Zip and ouch.
+- gz output bytes depend on whether 1 or 2+ threads are used (serial vs parallel path); both outputs are valid and decompress identically.
 
 ## 6. UI
 - Slint is decided. Phase 0 stays only as a baseline measurement of cold start, memory and binary size. Tauri and Dioxus (WebView) are rejected.

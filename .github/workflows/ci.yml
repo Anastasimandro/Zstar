@@ -121,7 +121,10 @@ jobs:
         if: matrix.target == ''
         run: |
           cargo test --locked -p zstar-rar-sys -p zstar-rar
-          cargo test --locked -p zstar-core --features rar
+          # Only the RAR paths: the rest of zstar-core's suite has timing and non-UTF-8 name tests
+          # that are not run on macOS elsewhere in CI and are unrelated to RAR.
+          cargo test --locked -p zstar-core --features rar --test rar_stubs
+          cargo test --locked -p zstar-core --features rar --lib -- rar detect
           cargo build --locked -p zstar-cli --features rar
       - name: Clippy with `rar`
         if: matrix.name == 'linux-gnu'

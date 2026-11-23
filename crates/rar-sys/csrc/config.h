@@ -50,6 +50,21 @@
 #define HAVE_UNSIGNED_LONG_LONG 1
 #define HAVE_UNSIGNED_LONG_LONG_INT 1
 
+#if defined(_WIN32) && !defined(__CYGWIN__)
+/* MSVC has none of these POSIX types; archive_windows.h and archive_platform_stat.h use them.
+   Same definitions as libarchive's own Windows config. */
+#include <stddef.h>
+#define uid_t short
+#define gid_t short
+#define pid_t int
+#define mode_t unsigned short
+#if defined(_WIN64)
+typedef __int64 ssize_t;
+#else
+typedef int ssize_t;
+#endif
+#endif
+
 #if defined(_WIN32)
 #define SIZEOF_WCHAR_T 2
 #else

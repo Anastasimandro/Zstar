@@ -54,14 +54,17 @@
 /* MSVC has none of these POSIX types; archive_windows.h and archive_platform_stat.h use them.
    Same definitions as libarchive's own Windows config. */
 #include <stddef.h>
+#include <limits.h>
 #define uid_t short
 #define gid_t short
 #define pid_t int
 #define mode_t unsigned short
 #if defined(_WIN64)
 typedef __int64 ssize_t;
+#define SSIZE_MAX _I64_MAX
 #else
 typedef int ssize_t;
+#define SSIZE_MAX INT_MAX
 #endif
 #endif
 

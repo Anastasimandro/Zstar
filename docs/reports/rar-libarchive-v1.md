@@ -41,18 +41,24 @@ Rows 1-8 are the cases of the earlier expected column; rows 9-10 are cases the f
 | `hyperfine zstar --version` | ~1.7-1.8 ms | ~1.7-1.8 ms (a first run showed +21%; reversed order showed it was an ordering artefact) |
 | Peak RAM, extracting the largest fixture (`store.rar`, RAR5 stored, 100,399 B, one run) | not measured | **13,152 KiB** peak RSS. The same harness running `zstar --version` read 13,144 KiB, so the harness floor dominates: this says "about 12.8 MiB at most" for a small archive, nothing about a ~1 GB one |
 
-## Platforms (CI job `rar-build`)
+## Platforms (CI job `rar-build`, run 45471824957 on main, commit ea8c782)
 
-Linux gnu, Linux musl, Windows MSVC, macOS arm64, Android arm64. Only Linux gnu was built locally.
-The others run in CI only (this environment cannot install those targets); results are reported
-after the push, not assumed.
+| Platform | Result |
+|----------|--------|
+| Linux gnu | pass: build, unit tests, `rar_stubs`, `rar_fixtures` (same outcomes as the table), CLI build |
+| Linux musl | pass: `zstar-rar` builds (build only, no tests run) |
+| Windows MSVC | pass: same steps as Linux gnu; `rar_fixtures` outcomes identical to the table |
+| macOS arm64 | pass: same steps as Linux gnu; `rar_fixtures` outcomes identical to the table |
+| Android arm64 | pass on the first run: `zstar-rar` cross-builds (build only, no tests run) |
 
 ## Fuzzing
 
-Target `rar_list_extract` (10 s per input, 512 MB), dictionary with RAR4/RAR5 signatures, six
-synthetic seeds in `fuzz/seeds/rar_list_extract/` (not fixtures). It builds and passes check/clippy
-locally. **The 5-minute run was not done**: libFuzzer needs nightly and the toolchain cannot be
-installed here. Plan: `fuzz.yml` via workflow_dispatch with 300 s, after the fixtures are added as seeds.
+Target `rar_list_extract` (10 s per input, 512 MB), dictionary with RAR4/RAR5 signatures. Seeds: the
+six synthetic stubs in `fuzz/seeds/rar_list_extract/` plus the 24 real fixtures, read straight from
+`tests/fixtures/rar/` by `fuzz/seeds.py` (no second copy; `store.rar`, 100,399 B, is cut to the
+65,536 B `-max_len`). `fuzz.yml` via workflow_dispatch, 300 s (run 45471840790): 30 seed files,
+445,524 executions in 301 s (~1,480/s), peak RSS 88 MB, **no crash, no timeout, no OOM**. The other
+six targets ran in the same dispatch and also ended without findings.
 
 ## Not confirmed / known limits
 

@@ -74,7 +74,7 @@ jobs:
   # The optional RAR reader is vendored C (libarchive) built by `cc`, so it is the one part of the
   # workspace that can fail to compile on a platform only. Every platform is built separately and
   # none blocks the others. macOS is paused for releases (ADR 0004) but is built here on purpose.
-  # No fixtures are needed for the build itself; the fixture table runs in `test` once present.
+  # The build needs no fixtures; the fixture test (rar_fixtures) runs on the host builds.
   rar-build:
     strategy:
       fail-fast: false
@@ -124,6 +124,7 @@ jobs:
           # Only the RAR paths: the rest of zstar-core's suite has timing and non-UTF-8 name tests
           # that are not run on macOS elsewhere in CI and are unrelated to RAR.
           cargo test --locked -p zstar-core --features rar --test rar_stubs
+          cargo test --locked -p zstar-core --features rar --test rar_fixtures
           cargo test --locked -p zstar-core --features rar --lib -- rar detect
           cargo build --locked -p zstar-cli --features rar
       - name: Clippy with `rar`

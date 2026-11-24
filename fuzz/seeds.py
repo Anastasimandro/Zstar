@@ -14,4 +14,10 @@ for hex_file in sorted((root / "seeds").glob("*/*.hex")):
     data = bytes.fromhex("".join(hex_file.read_text().split()))
     (target / hex_file.stem).write_bytes(data)
     count += 1
+# The real RAR fixtures are seeds too, read straight from tests/fixtures/rar/ (no second copy).
+rar_target = out / "rar_list_extract"
+for rar in sorted((root.parent / "tests" / "fixtures" / "rar").glob("*.rar")):
+    rar_target.mkdir(parents=True, exist_ok=True)
+    (rar_target / f"fixture_{rar.stem}").write_bytes(rar.read_bytes())
+    count += 1
 print(f"unpacked {count} seeds into {out}", file=sys.stderr)
